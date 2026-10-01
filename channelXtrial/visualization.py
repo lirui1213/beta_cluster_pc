@@ -219,6 +219,29 @@ def _concat_trial_curve(
     return x_axis * 1000.0, values
 
 
+def _concat_trial_audio(
+    epochs: "BetaProgressEpochs",
+    trial_index: int,
+) -> tuple[FloatArray, FloatArray]:
+    duration = float(epochs.events.iloc[trial_index]["duration"])
+    speech_seconds = epochs.progress_percent / 100.0 * duration
+    x_axis = np.concatenate(
+        [
+            epochs.pre_times[:-1],
+            speech_seconds,
+            duration + epochs.post_times[1:],
+        ]
+    )
+    values = np.concatenate(
+        [
+            epochs.audio_pre[trial_index, :-1],
+            epochs.audio_speech[trial_index],
+            epochs.audio_post[trial_index, 1:],
+        ]
+    )
+    return x_axis * 1000.0, values
+
+
 def plot_channel_trial_curves(
     epochs: "BetaProgressEpochs",
     classified_table: pd.DataFrame,
@@ -226,9 +249,10 @@ def plot_channel_trial_curves(
     *,
     max_trials: int = 24,
     trial_indices: Sequence[int] | None = None,
+    overlay_audio: bool = False,
     figure: Figure | None = None,
 ) -> tuple[Figure, NDArray[np.object_]]:
-    """Show single-trial beta curves for one channel, colored by Type."""
+    """Show single-trial beta curves for one channel, optionally with audio."""
 
     if channel not in epochs.channel_names:
         raise ValueError(f"Unknown channel: {channel}")
@@ -272,6 +296,24 @@ def plot_channel_trial_curves(
         duration_ms = float(epochs.events.iloc[trial_index]["duration"]) * 1000.0
         trial_type = str(row["trial_type"])
         axis.plot(x_ms, values, color=TYPE_COLORS.get(trial_type, "gray"), linewidth=1.4)
+        if overlay_audio:
+            audio_x_ms, audio_values = _concat_trial_audio(epochs, trial_index)
+            audio_axis = axis.twinx()
+            audio_axis.plot(
+                audio_x_ms,
+                audio_values,
+                color="black",
+                linewidth=1.0,
+                linestyle="--",
+                alpha=0.70,
+            )
+            audio_axis.set_ylim(-0.05, 1.05)
+            audio_axis.tick_params(axis="y", colors="black", labelsize=6)
+            audio_axis.spines["right"].set_color("black")
+            if axis is flat_axes[min(len(subset), len(flat_axes)) - 1]:
+                audio_axis.set_ylabel("Audio", color="black", fontsize=8)
+            else:
+                audio_axis.set_yticklabels([])
         axis.axvline(0.0, color="black", linestyle="--", linewidth=0.7)
         axis.axvline(duration_ms, color="black", linestyle="--", linewidth=0.7)
         axis.axhline(0.0, color="black", linewidth=0.5, alpha=0.35)
@@ -280,7 +322,8 @@ def plot_channel_trial_curves(
     for unused in flat_axes[len(subset):]:
         unused.set_visible(False)
     axes[0, 0].set_ylabel("Beta Z")
-    figure.suptitle(f"{channel}: single-trial beta curves", fontsize=12)
+    suffix = " with audio envelope" if overlay_audio else ""
+    figure.suptitle(f"{channel}: single-trial beta curves{suffix}", fontsize=12)
     return figure, axes
 
 

@@ -338,8 +338,11 @@ outputs/HS001/channelXtrial
 - `*_type_sequence.png`
   - 自动选择的示例通道 trial-wise type、分数和形态特征轨迹。
 
-- `*_trial_curves.png`
-  - 自动选择的示例通道单 trial beta 曲线小面板。
+- `*_trial_curves_no_audio.png`
+  - 自动选择的示例通道单 trial beta 曲线小面板，不叠加音频包络。
+
+- `*_trial_curves_with_audio.png`
+  - 自动选择的示例通道单 trial beta 曲线小面板，并在每个 trial 上叠加该 trial 的音频包络。
 
 HS001 当前 smoke test 结果：
 

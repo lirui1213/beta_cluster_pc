@@ -126,14 +126,28 @@ def run_channelxtrial_analysis(
             dpi=300,
             bbox_inches="tight",
         )
+        max_trials = len(beta_epochs.events) if max_display_trials is None else max_display_trials
         curve_figure, _ = plot_channel_trial_curves(
             beta_epochs,
             classified,
             chosen_channel,
-            max_trials=len(beta_epochs.events) if max_display_trials is None else max_display_trials,
+            max_trials=max_trials,
+            overlay_audio=False,
         )
         curve_figure.savefig(
-            output_path / f"{chosen_channel}_trial_curves.png",
+            output_path / f"{chosen_channel}_trial_curves_no_audio.png",
+            dpi=300,
+            bbox_inches="tight",
+        )
+        audio_curve_figure, _ = plot_channel_trial_curves(
+            beta_epochs,
+            classified,
+            chosen_channel,
+            max_trials=max_trials,
+            overlay_audio=True,
+        )
+        audio_curve_figure.savefig(
+            output_path / f"{chosen_channel}_trial_curves_with_audio.png",
             dpi=300,
             bbox_inches="tight",
         )
