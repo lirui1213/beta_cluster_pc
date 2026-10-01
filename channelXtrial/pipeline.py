@@ -57,6 +57,7 @@ def _resolve_example_channel(
     candidates = [raw]
     if raw.isdigit():
         candidates.append(f"ECoG_{int(raw)}")
+        candidates.append(f"E{int(raw)}")
     for candidate in candidates:
         if candidate in channel_names:
             return candidate
@@ -81,6 +82,7 @@ def run_channelxtrial_analysis(
     feature_config: TrialTypeFeatureConfig | None = None,
     classifier_config: TrialTypeClassifierConfig | None = None,
     example_channel: str | int | None = None,
+    max_display_trials: int | None = None,
 ) -> ChannelXTrialAnalysisResult:
     """Run the full Type 1/Type 2 channel x trial analysis and save outputs."""
 
@@ -124,7 +126,12 @@ def run_channelxtrial_analysis(
             dpi=300,
             bbox_inches="tight",
         )
-        curve_figure, _ = plot_channel_trial_curves(beta_epochs, classified, chosen_channel)
+        curve_figure, _ = plot_channel_trial_curves(
+            beta_epochs,
+            classified,
+            chosen_channel,
+            max_trials=len(beta_epochs.events) if max_display_trials is None else max_display_trials,
+        )
         curve_figure.savefig(
             output_path / f"{chosen_channel}_trial_curves.png",
             dpi=300,

@@ -9,6 +9,8 @@ from channelXtrial import (
     compute_channel_stability,
     extract_trial_type_features,
 )
+from channelXtrial.pipeline import _resolve_example_channel
+from channelXtrial.visualization import plot_channel_trial_curves
 
 
 def _synthetic_beta_epochs() -> BetaProgressEpochs:
@@ -86,3 +88,20 @@ def test_channelxtrial_stability_metrics():
     assert set(stability["channel"]) == {"E0", "E1"}
     assert (stability["stability_rate"] == 1.0).all()
     assert (stability["switch_count"] == 0).all()
+
+
+def test_numeric_channel_selection_and_all_trial_display():
+    epochs = _synthetic_beta_epochs()
+    classified = classify_trial_types(extract_trial_type_features(epochs))
+    stability = compute_channel_stability(classified)
+    assert _resolve_example_channel(1, epochs.channel_names, stability) == "E1"
+
+    figure, axes = plot_channel_trial_curves(
+        epochs,
+        classified,
+        "E1",
+        max_trials=len(epochs.events),
+    )
+    visible_axes = [axis for axis in axes.ravel() if axis.get_visible()]
+    assert len(visible_axes) == len(epochs.events)
+    figure.clf()
