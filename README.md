@@ -12,6 +12,7 @@
 - `clustering_pipeline.py`：仅使用好通道执行缺失值填充、标准化、带权 K-means、PCA 和两轮坏道复审；第二轮会重新拟合全部预处理器，避免数据泄漏。
 - `visualization.py`：绘制簇级均值和 SEM 动态曲线、beta 百分比进程曲线、两个互不重叠 trial 示例图，提供 Tk 坏道复审窗口，以及可选的电极三维显示和 FreeSurfer/PyVista 脑表面渲染。
 - `ECoG_3band_clustering_pipeline.ipynb`：中文 Notebook 入口，默认运行 beta-only 百分比进程流程，从参数设置到特征提取、带权两轮聚类、导出结果和可选三维显示。
+- `channelXtrial/`：单通道跨 trial 的 beta Type1/Type2 动态模式稳定性分析，输出 channel x trial 热图、通道稳定性表和单通道轨迹图。
 - `tests/test_pipeline.py`：事件、分段、特征维度、坏道标签和二轮重拟合测试。
 - `requirements.txt`：核心运行依赖。
 - `requirements-dev.txt`：测试依赖。
