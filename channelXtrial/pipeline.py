@@ -30,7 +30,7 @@ class ChannelXTrialAnalysisResult:
     classified_trials: pd.DataFrame
     channel_stability: pd.DataFrame
     output_dir: Path
-    example_channel: str | None
+    example_channel: str | int | None
 
 
 def _choose_example_channel(stability: pd.DataFrame) -> str | None:
@@ -44,6 +44,26 @@ def _choose_example_channel(stability: pd.DataFrame) -> str | None:
         ascending=[False, True, False],
     )
     return str(usable.iloc[0]["channel"])
+
+
+def _resolve_example_channel(
+    example_channel: str | int | None,
+    channel_names: tuple[str, ...],
+    stability: pd.DataFrame,
+) -> str | None:
+    if example_channel is None or str(example_channel).strip() == "":
+        return _choose_example_channel(stability)
+    raw = str(example_channel).strip()
+    candidates = [raw]
+    if raw.isdigit():
+        candidates.append(f"ECoG_{int(raw)}")
+    for candidate in candidates:
+        if candidate in channel_names:
+            return candidate
+    raise ValueError(
+        "example_channel must be an existing channel name such as 'ECoG_124', "
+        "or a numeric channel id such as 124."
+    )
 
 
 def run_channelxtrial_analysis(
@@ -60,7 +80,7 @@ def run_channelxtrial_analysis(
     pre_post_window: float | None = None,
     feature_config: TrialTypeFeatureConfig | None = None,
     classifier_config: TrialTypeClassifierConfig | None = None,
-    example_channel: str | None = None,
+    example_channel: str | int | None = None,
 ) -> ChannelXTrialAnalysisResult:
     """Run the full Type 1/Type 2 channel x trial analysis and save outputs."""
 
@@ -92,7 +112,11 @@ def run_channelxtrial_analysis(
     proportion_figure, _ = plot_block_type_proportions(classified)
     proportion_figure.savefig(output_path / "block_type_proportions.png", dpi=300, bbox_inches="tight")
 
-    chosen_channel = example_channel or _choose_example_channel(stability)
+    chosen_channel = _resolve_example_channel(
+        example_channel,
+        beta_epochs.channel_names,
+        stability,
+    )
     if chosen_channel is not None:
         sequence_figure, _ = plot_channel_type_sequence(classified, chosen_channel)
         sequence_figure.savefig(
