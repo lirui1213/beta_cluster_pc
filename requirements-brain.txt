@@ -1,0 +1,4 @@
+-r requirements.txt
+nibabel
+pyvista
+scikit-image

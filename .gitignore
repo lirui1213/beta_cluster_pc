@@ -1,0 +1,8 @@
+.venv/
+.mne-home/
+.mplconfig/
+.pytest_cache/
+__pycache__/
+outputs/
+.ipynb_checkpoints/
+*.py[cod]
