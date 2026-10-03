@@ -26,7 +26,7 @@
 - ECoG：`*_clean_car-raw.fif`，保留 `raw.info["bads"]`。
 - 事件：CSV、DataFrame、二维 NPY，或分别存储的 `onset.npy` 与 `offset.npy`。
 - 音频：单声道或多声道 WAV。
-- 可选解剖数据：Scanner RAS 电极坐标 CSV、FreeSurfer `orig.mgz` 和 pial surface，以及可选肿瘤 NIfTI 掩膜。
+- 可选解剖数据：Scanner RAS 电极坐标 CSV、FreeSurfer 参考 MRI 和 pial surface，以及可选肿瘤掩膜。
 
 ## 本地环境
 
@@ -60,7 +60,7 @@ python -m venv .venv
 ECoG_3band_clustering_pipeline.ipynb
 ```
 
-在 VS Code 中选择当前目录的 `.venv` 作为 Notebook kernel，然后从上到下运行。当前已填入 `HS001` 数据路径，通常只需要确认 Notebook 第 2 节“参数区”中的 `SUBJECT_ID`、`DATA_DIR`、`EVENT_SOURCE`、`OFFSET_SOURCE` 和 `WAV_PATH`。
+在 VS Code 中选择当前目录的 `.venv` 作为 Notebook kernel，然后从上到下运行。当前已填入 `HS0015` / `B03` 数据路径，通常只需要确认 Notebook 第 2 节“参数区”中的 `SUBJECT_ID`、`BLOCK_ID`、`DATA_DIR`、`EVENT_SOURCE`、`OFFSET_SOURCE` 和 `WAV_PATH`。
 
 如果希望在浏览器中运行 JupyterLab：
 
@@ -191,19 +191,22 @@ render_electrode_clusters(
 
 ```python
 render_electrode_clusters(
-    "electrodes.csv",
+    r"I:\ECoG_data\HS0015\recon\electrodes\electrodes.csv",
     label_mapping,
-    subjects_dir="freesurfer_subjects",
-    subject="subject_01",
+    subjects_dir=r"I:\ECoG_data\HS0015",
+    subject="recon",
+    reference_mri=r"I:\ECoG_data\HS0015\recon\mri\T1.mgz",
+    hemispheres=("lh",),
     tumor_nifti=None,
 )
 ```
 
-此模式需要：
+当前 `HS0015/recon` 默认使用：
 
-- `mri/orig.mgz`
-- `surf/lh.pial` 和/或 `surf/rh.pial`
-- 可选的肿瘤 NIfTI 掩膜
+- `electrodes/electrodes.csv`
+- `mri/T1.mgz`
+- `surf/lh.pial`
+- 可选的肿瘤掩膜
 
 坐标使用以下矩阵从 Scanner RAS 转换到 FreeSurfer tkRAS：
 

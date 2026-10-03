@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
@@ -215,6 +216,7 @@ def plot_beta_progress_cluster_dynamics(
     labels: ArrayLike,
     *,
     include_bad: bool = False,
+    sigma_seconds: float = 0.0,
     figure: Figure | None = None,
 ) -> tuple[Figure, NDArray[Any]]:
     """Plot beta dynamics before onset, during speech progress, and after offset.
@@ -247,15 +249,28 @@ def plot_beta_progress_cluster_dynamics(
         )
 
     shown_labels = [int(value) for value in np.unique(label_array) if include_bad or value != -1]
+    median_duration = _median_event_duration(epochs)
     panels = (
-        ("Pre-onset", epochs.pre_times, epochs.pre, epochs.audio_pre, "Time from onset (s)"),
-        ("Speech", epochs.progress_percent, epochs.speech, epochs.audio_speech, "Speech progress (%)"),
-        ("Post-offset", epochs.post_times, epochs.post, epochs.audio_post, "Time from offset (s)"),
+        ("Pre-onset", epochs.pre_times, epochs.pre, epochs.audio_pre, "Time from onset (s)", 1.0),
+        (
+            "Speech",
+            epochs.progress_percent,
+            epochs.speech,
+            epochs.audio_speech,
+            "Speech progress (%)",
+            median_duration / 100.0,
+        ),
+        ("Post-offset", epochs.post_times, epochs.post, epochs.audio_post, "Time from offset (s)", 1.0),
     )
     column_limits = ((float(epochs.pre_times[0]), 0.0), (0.0, 100.0), (0.0, float(epochs.post_times[-1])))
 
-    for column, (title, axis_values, beta_values, audio_values, xlabel) in enumerate(panels):
-        audio_mean = np.nanmean(audio_values, axis=0)
+    for column, (title, axis_values, beta_values, audio_values, xlabel, seconds_per_axis_unit) in enumerate(panels):
+        display_sfreq = _display_sfreq(axis_values, seconds_per_axis_unit=seconds_per_axis_unit)
+        audio_mean = gaussian_smooth_nan(
+            np.nanmean(audio_values, axis=0),
+            display_sfreq,
+            sigma_seconds=sigma_seconds,
+        )
         audio_slope = np.gradient(audio_mean, axis_values)
         audio_display = audio_mean.copy()
         audio_display -= np.nanmean(audio_display)
@@ -288,6 +303,8 @@ def plot_beta_progress_cluster_dynamics(
             if not np.any(selected):
                 continue
             mean, sem, count = _mean_sem_by_electrode(beta_values[:, selected, :])
+            mean = gaussian_smooth_nan(mean, display_sfreq, sigma_seconds=sigma_seconds)
+            sem = gaussian_smooth_nan(sem, display_sfreq, sigma_seconds=sigma_seconds)
             beta_slope = np.gradient(mean, axis_values)
             interaction = beta_slope * audio_slope
             color = cluster_color(label)
@@ -412,14 +429,28 @@ def plot_two_nonoverlapping_beta_trials(
     return figure, np.asarray(axes, dtype=object)
 
 
+def _median_event_duration(epochs: "BetaProgressEpochs") -> float:
+    median_duration = float(np.nanmedian(epochs.events["duration"].to_numpy(float)))
+    if not np.isfinite(median_duration) or median_duration <= 0:
+        raise ValueError("Retained events must have a finite positive median duration.")
+    return median_duration
+
+
+def _display_sfreq(axis_values: ArrayLike, *, seconds_per_axis_unit: float = 1.0) -> float:
+    axis = np.asarray(axis_values, dtype=float)
+    steps = np.diff(axis)
+    finite_steps = np.abs(steps[np.isfinite(steps) & (np.abs(steps) > 0)])
+    if finite_steps.size == 0 or not np.isfinite(seconds_per_axis_unit) or seconds_per_axis_unit <= 0:
+        return 1.0
+    return 1.0 / (float(np.nanmedian(finite_steps)) * seconds_per_axis_unit)
+
+
 def _concat_beta_progress_display(
     epochs: "BetaProgressEpochs",
 ) -> tuple[FloatArray, FloatArray, FloatArray, float]:
     """Concatenate pre, normalized speech, and post on a display-time axis."""
 
-    median_duration = float(np.nanmedian(epochs.events["duration"].to_numpy(float)))
-    if not np.isfinite(median_duration) or median_duration <= 0:
-        raise ValueError("Retained events must have a finite positive median duration.")
+    median_duration = _median_event_duration(epochs)
     speech_seconds = epochs.progress_percent / 100.0 * median_duration
     x_axis = np.concatenate(
         [
@@ -453,6 +484,7 @@ def plot_beta_cluster_grid(
     *,
     include_bad: bool = False,
     max_columns: int = 5,
+    sigma_seconds: float = 0.0,
     figure: Figure | None = None,
 ) -> tuple[Figure, NDArray[Any]]:
     """Plot one beta-only cluster panel per cluster with audio overlay.
@@ -498,7 +530,12 @@ def plot_beta_cluster_grid(
         )
 
     x_axis, beta_values, audio_values, median_duration = _concat_beta_progress_display(epochs)
-    audio_mean = np.nanmean(audio_values, axis=0)
+    display_sfreq = _display_sfreq(x_axis)
+    audio_mean = gaussian_smooth_nan(
+        np.nanmean(audio_values, axis=0),
+        display_sfreq,
+        sigma_seconds=sigma_seconds,
+    )
     x_ms = x_axis * 1000.0
     onset_ms = 0.0
     offset_ms = median_duration * 1000.0
@@ -508,6 +545,8 @@ def plot_beta_cluster_grid(
         axis: Axes = flat_axes[axis_index]
         selected = label_array == label
         mean, sem, count = _mean_sem_by_electrode(beta_values[:, selected, :])
+        mean = gaussian_smooth_nan(mean, display_sfreq, sigma_seconds=sigma_seconds)
+        sem = gaussian_smooth_nan(sem, display_sfreq, sigma_seconds=sigma_seconds)
         color = cluster_color(label)
         title = "Bad" if label == -1 else f"Cluster {label}"
         axis.plot(x_ms, mean, color=color, linewidth=2.2)
@@ -693,18 +732,30 @@ def load_electrode_coordinates(
         return "".join(character for character in value.lower() if character.isalnum())
 
     lower = {canonical(str(column)): str(column) for column in frame.columns}
+    channel_values: pd.Series | None = None
     if channel_column is None:
         channel_column = next(
             (lower[name] for name in ("channel", "name", "electrode", "label") if name in lower),
             None,
         )
-    if channel_column is None or channel_column not in frame:
+        if channel_column is None and "gridid" in lower:
+            grid_ids = pd.to_numeric(frame[lower["gridid"]], errors="raise")
+            if grid_ids.isna().any():
+                raise ValueError("grid id contains missing values; cannot infer ECoG channels.")
+            channel_values = grid_ids.astype(int).map(lambda value: f"ECoG_{value}")
+    if channel_values is None:
+        if channel_column is None or channel_column not in frame:
+            raise ValueError("Could not identify the electrode channel-name column.")
+        channel_values = frame[channel_column].astype(str)
+    if channel_values.isna().any():
         raise ValueError("Could not identify the electrode channel-name column.")
     if coordinate_columns is None:
         candidate_sets = (
+            ("registeredlocationx", "registeredlocationy", "registeredlocationz"),
             ("x", "y", "z"),
             ("scannerrasx", "scannerrasy", "scannerrasz"),
             ("rasx", "rasy", "rasz"),
+            ("originallocationx", "originallocationy", "originallocationz"),
         )
         coordinate_columns = next(
             ((lower[x], lower[y], lower[z]) for x, y, z in candidate_sets if all(v in lower for v in (x, y, z))),
@@ -714,7 +765,7 @@ def load_electrode_coordinates(
         raise ValueError("Could not identify three Scanner RAS coordinate columns.")
     result = pd.DataFrame(
         {
-            "channel": frame[channel_column].astype(str),
+            "channel": channel_values.astype(str),
             "x": pd.to_numeric(frame[coordinate_columns[0]], errors="raise"),
             "y": pd.to_numeric(frame[coordinate_columns[1]], errors="raise"),
             "z": pd.to_numeric(frame[coordinate_columns[2]], errors="raise"),
@@ -766,6 +817,50 @@ def _load_tumor_mesh(
     return _triangular_polydata(tkras_vertices, triangles)
 
 
+def show_pyvista_window(
+    plotter: Any,
+    *,
+    pv_module: Any,
+    camera_position: str = "xy",
+    screenshot: str | Path | None = None,
+) -> Any:
+    """Open an interactive desktop PyVista window, even from a notebook."""
+
+    plotter.camera_position = camera_position
+    plotter.reset_camera()
+    plotter.add_axes()
+    try:
+        plotter.enable_trackball_style()
+    except AttributeError:
+        pass
+
+    try:
+        pv_module.global_theme.notebook = False
+    except Exception:
+        pass
+    try:
+        pv_module.set_jupyter_backend(None)
+    except Exception:
+        try:
+            pv_module.set_jupyter_backend("none")
+        except Exception:
+            pass
+
+    try:
+        result = plotter.show(notebook=False, interactive=True, auto_close=False)
+    except TypeError:
+        try:
+            result = plotter.show(notebook=False)
+        except TypeError:
+            result = plotter.show()
+    if screenshot is not None:
+        try:
+            plotter.screenshot(str(screenshot), return_img=False)
+        except RuntimeError as exc:
+            warnings.warn(f"PyVista window opened, but screenshot was not saved: {exc}")
+    return result
+
+
 def _labels_for_electrodes(
     electrodes: pd.DataFrame,
     labels: Mapping[str, int] | Sequence[int],
@@ -789,6 +884,206 @@ def _labels_for_electrodes(
     )
 
 
+def _set_actor_visibility(actor: Any, visible: bool) -> None:
+    if hasattr(actor, "SetVisibility"):
+        actor.SetVisibility(bool(visible))
+    elif hasattr(actor, "visibility"):
+        actor.visibility = bool(visible)
+
+
+def _set_actor_color(actor: Any, color: Sequence[float]) -> None:
+    prop = actor.GetProperty() if hasattr(actor, "GetProperty") else getattr(actor, "prop", None)
+    if prop is None:
+        return
+    if hasattr(prop, "SetColor"):
+        prop.SetColor(float(color[0]), float(color[1]), float(color[2]))
+    elif hasattr(prop, "color"):
+        prop.color = tuple(map(float, color[:3]))
+
+
+def render_selectable_electrode_class(
+    electrode_csv: str | Path,
+    labels: Mapping[str, int] | Sequence[int],
+    *,
+    subjects_dir: str | Path | None = None,
+    subject: str | None = None,
+    channel_order: Sequence[str] | None = None,
+    reference_mri: str | Path | None = None,
+    hemispheres: Sequence[str] = ("lh", "rh"),
+    tumor_nifti: str | Path | None = None,
+    tumor_threshold: float = 0.5,
+    selected_label: int | None = None,
+    selected_color: str | Sequence[float] = "red",
+    electrode_radius: float = 1.6,
+    window_size: tuple[int, int] = (1200, 900),
+    camera_position: str = "xy",
+    brain_color: str = "lightgray",
+    brain_opacity: float = 0.38,
+    brain_specular: float = 0.08,
+    tumor_color: str = "yellow",
+    tumor_opacity: float = 0.30,
+    background_color: str = "white",
+    slider_x: float = 0.02,
+    slider_top_y: float = 0.93,
+    slider_length: float = 0.24,
+    slider_y_gap: float = 0.055,
+    slider_width: float = 0.018,
+    slider_tube_width: float = 0.005,
+    slider_title_height: float = 0.020,
+    slider_text_font_size: int = 8,
+    show: bool = True,
+) -> Any:
+    """Render one selectable electrode class with PyVista popup controls."""
+
+    try:
+        import matplotlib.colors as mcolors
+        import pyvista as pv
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError("Brain rendering requires pyvista and matplotlib.") from exc
+
+    surface_requested = subjects_dir is not None or subject is not None
+    if (subjects_dir is None) != (subject is None):
+        raise ValueError("subjects_dir and subject must be supplied together.")
+    root = None if not surface_requested else Path(subjects_dir) / str(subject)
+    if reference_mri is None and root is not None:
+        reference_mri = root / "mri" / "orig.mgz"
+    reference_path = None if reference_mri is None else Path(reference_mri)
+    if reference_path is not None and not reference_path.is_file():
+        raise FileNotFoundError(f"FreeSurfer reference MRI does not exist: {reference_path}")
+    if tumor_nifti is not None and reference_path is None:
+        raise ValueError("tumor_nifti requires reference_mri or FreeSurfer subject data.")
+
+    electrodes = load_electrode_coordinates(electrode_csv)
+    aligned_labels = _labels_for_electrodes(electrodes, labels, channel_order)
+    unique_labels = tuple(int(label) for label in sorted(set(aligned_labels)))
+    if not unique_labels:
+        raise ValueError("No electrode labels are available to display.")
+    if selected_label is None:
+        selected_label = next((label for label in unique_labels if label >= 0), unique_labels[0])
+    if selected_label not in unique_labels:
+        raise ValueError(f"selected_label {selected_label} is not present in labels: {unique_labels}")
+
+    scanner_coordinates = electrodes[["x", "y", "z"]].to_numpy(dtype=float)
+    display_coordinates = (
+        scanner_coordinates
+        if reference_path is None
+        else scanner_ras_to_tkras(scanner_coordinates, reference_path)
+    )
+    selected_rgb = list(mcolors.to_rgb(selected_color))
+
+    try:
+        pv.global_theme.notebook = False
+    except Exception:
+        pass
+    plotter = pv.Plotter(off_screen=not show, notebook=False, window_size=list(window_size))
+    if root is not None:
+        for hemisphere in hemispheres:
+            if hemisphere not in {"lh", "rh"}:
+                raise ValueError("hemispheres may contain only 'lh' and 'rh'.")
+            pial_path = root / "surf" / f"{hemisphere}.pial"
+            if not pial_path.is_file():
+                raise FileNotFoundError(f"Pial surface does not exist: {pial_path}")
+            plotter.add_mesh(
+                _load_pial_mesh(pial_path),
+                color=brain_color,
+                opacity=brain_opacity,
+                smooth_shading=True,
+                specular=brain_specular,
+            )
+    if tumor_nifti is not None:
+        assert reference_path is not None
+        plotter.add_mesh(
+            _load_tumor_mesh(tumor_nifti, reference_path, threshold=tumor_threshold),
+            color=tumor_color,
+            opacity=tumor_opacity,
+            smooth_shading=True,
+        )
+
+    actors_by_label: dict[int, list[Any]] = {label: [] for label in unique_labels}
+    for coordinate, label in zip(display_coordinates, aligned_labels, strict=True):
+        actor = plotter.add_mesh(
+            pv.Sphere(
+                radius=electrode_radius,
+                center=coordinate,
+                theta_resolution=24,
+                phi_resolution=24,
+            ),
+            color=selected_rgb if int(label) == selected_label else cluster_color(int(label)),
+            smooth_shading=True,
+        )
+        actors_by_label[int(label)].append(actor)
+
+    state = {"label": int(selected_label), "color": selected_rgb}
+
+    def apply_selection() -> None:
+        for label, actors in actors_by_label.items():
+            visible = label == state["label"]
+            for actor in actors:
+                _set_actor_visibility(actor, visible)
+                if visible:
+                    _set_actor_color(actor, state["color"])
+        if hasattr(plotter, "render"):
+            plotter.render()
+
+    def set_label(slider_value: float) -> None:
+        index = int(round(float(slider_value)))
+        index = min(max(index, 0), len(unique_labels) - 1)
+        state["label"] = unique_labels[index]
+        apply_selection()
+
+    def set_color_component(index: int, value: float) -> None:
+        state["color"][index] = float(value)
+        apply_selection()
+
+    selected_index = unique_labels.index(int(selected_label))
+    plotter.add_slider_widget(
+        set_label,
+        [0, len(unique_labels) - 1],
+        value=selected_index,
+        title="Cluster",
+        pointa=(slider_x, slider_top_y),
+        pointb=(slider_x + slider_length, slider_top_y),
+        slider_width=slider_width,
+        tube_width=slider_tube_width,
+        title_height=slider_title_height,
+        style="modern",
+    )
+    for color_index, (title, y_position) in enumerate(
+        (
+            ("Red", slider_top_y - slider_y_gap),
+            ("Green", slider_top_y - slider_y_gap * 2),
+            ("Blue", slider_top_y - slider_y_gap * 3),
+        )
+    ):
+        plotter.add_slider_widget(
+            lambda value, index=color_index: set_color_component(index, value),
+            [0.0, 1.0],
+            value=state["color"][color_index],
+            title=title,
+            pointa=(slider_x, y_position),
+            pointb=(slider_x + slider_length, y_position),
+            slider_width=slider_width,
+            tube_width=slider_tube_width,
+            title_height=slider_title_height,
+            style="modern",
+        )
+    if hasattr(plotter, "add_text"):
+        labels_text = ", ".join(map(str, unique_labels))
+        plotter.add_text(
+            f"Only selected cluster is shown. Labels: {labels_text}",
+            position="upper_left",
+            font_size=slider_text_font_size,
+            color="black",
+        )
+
+    plotter.set_background(background_color)
+    plotter.camera_position = camera_position
+    apply_selection()
+    if show:
+        show_pyvista_window(plotter, pv_module=pv, camera_position=camera_position)
+    return plotter
+
+
 def render_electrode_clusters(
     electrode_csv: str | Path,
     labels: Mapping[str, int] | Sequence[int],
@@ -801,6 +1096,14 @@ def render_electrode_clusters(
     tumor_nifti: str | Path | None = None,
     tumor_threshold: float = 0.5,
     point_size: float = 14.0,
+    window_size: tuple[int, int] = (1200, 900),
+    camera_position: str = "xy",
+    brain_color: str = "lightgray",
+    brain_opacity: float = 0.38,
+    brain_specular: float = 0.08,
+    tumor_color: str = "yellow",
+    tumor_opacity: float = 0.30,
+    background_color: str = "white",
     show: bool = True,
     screenshot: str | Path | None = None,
 ) -> Any:
@@ -845,7 +1148,11 @@ def render_electrode_clusters(
         dtype=np.uint8,
     )
 
-    plotter = pv.Plotter(off_screen=not show)
+    try:
+        pv.global_theme.notebook = False
+    except Exception:
+        pass
+    plotter = pv.Plotter(off_screen=not show, notebook=False, window_size=list(window_size))
     if root is not None:
         for hemisphere in hemispheres:
             if hemisphere not in {"lh", "rh"}:
@@ -854,14 +1161,19 @@ def render_electrode_clusters(
             if not pial_path.is_file():
                 raise FileNotFoundError(f"Pial surface does not exist: {pial_path}")
             plotter.add_mesh(
-                _load_pial_mesh(pial_path), color="lightgray", opacity=0.38,
-                smooth_shading=True, specular=0.08,
+                _load_pial_mesh(pial_path),
+                color=brain_color,
+                opacity=brain_opacity,
+                smooth_shading=True,
+                specular=brain_specular,
             )
     if tumor_nifti is not None:
         assert reference_path is not None
         plotter.add_mesh(
             _load_tumor_mesh(tumor_nifti, reference_path, threshold=tumor_threshold),
-            color="yellow", opacity=0.30, smooth_shading=True,
+            color=tumor_color,
+            opacity=tumor_opacity,
+            smooth_shading=True,
         )
     cloud = pv.PolyData(display_coordinates)
     cloud["cluster_rgb"] = rgb
@@ -872,13 +1184,17 @@ def render_electrode_clusters(
         render_points_as_spheres=True,
         point_size=point_size,
     )
-    plotter.set_background("black")
-    plotter.add_axes()
-    plotter.view_isometric()
-    if screenshot is not None:
+    plotter.set_background(background_color)
+    plotter.camera_position = camera_position
+    if screenshot is not None and not show:
         plotter.screenshot(str(screenshot), return_img=False)
     if show:
-        plotter.show()
+        show_pyvista_window(
+            plotter,
+            pv_module=pv,
+            camera_position=camera_position,
+            screenshot=screenshot,
+        )
     return plotter
 
 
@@ -915,5 +1231,7 @@ __all__ = [
     "plot_two_nonoverlapping_beta_trials",
     "render_brain_clusters",
     "render_electrode_clusters",
+    "render_selectable_electrode_class",
     "scanner_ras_to_tkras",
+    "show_pyvista_window",
 ]

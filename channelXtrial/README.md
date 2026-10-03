@@ -294,7 +294,7 @@ Uncertain 比例
 在项目根目录启动 JupyterLab：
 
 ```powershell
-cd "E:\ECoG\Codex任务一\code\9.29test"
+cd "I:\贝塔频带汇报-2026-10"
 .\.venv\Scripts\python.exe -m jupyter lab
 ```
 
@@ -307,7 +307,7 @@ channelXtrial/channelXtrial_pipeline.ipynb
 默认使用：
 
 ```text
-E:\ECoG\Codex任务一\data\HS001\standardized
+I:\ECoG_data\HS0015\blocks\B03\standardized
 ```
 
 ## 输出文件
@@ -315,7 +315,7 @@ E:\ECoG\Codex任务一\data\HS001\standardized
 默认输出目录：
 
 ```text
-outputs/HS001/channelXtrial
+outputs/HS0015/B03/channelXtrial
 ```
 
 主要文件：
@@ -341,7 +341,7 @@ outputs/HS001/channelXtrial
 - `*_trial_curves.png`
   - 自动选择的示例通道单 trial beta 曲线小面板。
 
-HS001 当前 smoke test 结果：
+HS0015/B03 当前 smoke test 结果：
 
 ```text
 有效 trial: 44
