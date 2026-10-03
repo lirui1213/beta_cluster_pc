@@ -1,6 +1,6 @@
 # ECoG Beta 进程特征与两轮聚类管道
 
-本项目实现连续侵入式脑电（ECoG）的 beta 频带功率提取、语音 onset/offset 对齐、trial 时长过滤、0-100% 语音进程归一化、音频包络斜率耦合特征工程、带权两轮 K-means 聚类与可选的脑表面映射。
+本项目实现连续侵入式脑电（ECoG）的 beta 频带功率提取、语音 onset/offset 对齐、trial 时长过滤、0-100% 语音进程归一化、形态与音频斜率耦合特征、带权两轮 K-means 聚类及 trial 稳定性评估，并支持脑表面映射。
 
 代码中仍保留原三频带特征提取函数，便于复现早期分析；当前 Notebook 默认使用 beta-only 百分比进程流程。
 
@@ -10,6 +10,8 @@
 
 - `audio_cross_3band_utils.py`：加载 FIF、事件和 WAV，计算 Hilbert 功率，支持原三频带固定窗特征，也支持 beta-only 百分比 trial 进程特征。
 - `clustering_pipeline.py`：仅使用好通道执行缺失值填充、标准化、带权 K-means、PCA 和两轮坏道复审；第二轮会重新拟合全部预处理器，避免数据泄漏。
+- `signal_processing.py`：与功率尺度匹配的基线质量检查、NaN 安全平滑、多相抗混叠重采样和 Savitzky-Golay 导数。
+- `cluster_evaluation.py`：K=2-6 的轮廓系数、独立分半 trial ARI、trial bootstrap ARI 和簇内波形一致性。
 - `visualization.py`：绘制簇级均值和 SEM 动态曲线、beta 百分比进程曲线、两个互不重叠 trial 示例图，提供 Tk 坏道复审窗口，以及可选的电极三维显示和 FreeSurfer/PyVista 脑表面渲染。
 - `ECoG_3band_clustering_pipeline.ipynb`：中文 Notebook 入口，默认运行 beta-only 百分比进程流程，从参数设置到特征提取、带权两轮聚类、导出结果和可选三维显示。
 - `channelXtrial/`：单通道跨 trial 的 beta Type1/Type2 动态模式稳定性分析，输出 channel x trial 热图、通道稳定性表和单通道轨迹图。
@@ -141,6 +143,24 @@ review = BadChannelReviewWindow(result.first_round).show()
 第二轮聚类会在排除全部坏道后重新拟合 `SimpleImputer`、`StandardScaler` 和 `KMeans`。所有坏道标签始终为 `-1`，PCA 坐标为 NaN。
 
 ## 动态曲线
+
+### 2026-10-03 分析优化
+
+优化前源码已保存到 GitHub 分支 `2026/10/03`，提交 `3b8d161`。优化在本地分支 `codex/beta-optimization-2026-10-03` 中继续，保留远端快照。
+
+基线分母改为真实的基线功率标准差，不再默认加 `1e-6`。质量下限由每个电极的典型基线标准差乘 `BASELINE_RELATIVE_FLOOR`（默认 `1e-3`）决定，同时使用相对于基线功率的数值精度下限。低方差或非有限基线会使该 trial/channel 的数据成为 NaN，并保存到 `baseline_quality.csv`。无效 trial 比例超过 `MAX_BASELINE_INVALID_FRACTION`（默认 0.25），或不足两个有效 trial 的电极不参与聚类。`baseline_invalid_fraction` 和 `valid_trial_count` 仅用于质量检查，不参与聚类。修正后 Z 值的数值尺度会改变，应从初始化 cell 开始重新运行，不能沿用旧的特征文件或标签。
+
+分类用的平滑参数 `FEATURE_SMOOTH_SIGMA_SECONDS` 默认 0.06 秒，按每个 trial 的实际时长换算；先平滑 beta 功率和音频包络，再用 `FEATURE_SLOPE_METHOD="savgol"` 估计导数。导数仍以说话进程百分比为单位。语音段降采样采用多相抗混叠滤波。
+
+新增早/中/晚响应、正负响应面积、正负峰及位置、主峰半突出度宽度、offset 回落/反弹等形态特征。特征筛选只使用好电极，优先保留可解释的形态和相关性特征，剔除常量、缺失过多及绝对相关性达到 `FEATURE_CORRELATION_THRESHOLD`（默认 0.95）的重复特征。`NORMALIZE_FEATURE_GROUP_WEIGHTS=True` 时，权重表示各特征组的总预算，避免同一组仅因列数更多而占据更大的距离权重。第二轮在坏道复审后重新进行特征筛选。
+
+`RUN_CLUSTER_STABILITY=True` 会在第二轮前比较 K=2-6。每种 trial 切分或重采样都重新提取特征，并独立拟合 imputer、scaler、KMeans。好电极名单由原始数据质量确定，不随重采样次数改变；无法支持固定电极名单的重采样会记为失败，而不会永久排除电极。至少需要四个有效 trial 才能分为两个独立 trial 子集；较少时保留人工设置的 K。完整但出现小簇的重采样仍计入 ARI，避免仅保留稳定结果而高估一致性。候选 K 的全数据最小簇需至少有 max(2, ceil(0.05 * 好电极数)) 个成员，且两种评估分别至少有 80% 完整有效重采样；符合条件者按轮廓系数、分半 ARI 和 bootstrap ARI 的平均名次推荐 K，同名次选较小 K。`AUTO_SELECT_K=True` 使用推荐 K；设为 False 可保留复审窗口设置。指标和逐次重采样结果分别保存到 `cluster_stability_summary.csv` 与 `cluster_stability_resamples.csv`，图为 `cluster_stability.png`。这些指标衡量描述性分离度和重现性，不是显著性检验或固定生理类别。
+
+Cell 7 先把 pre、speech、post 映射到统一的等间隔显示网格，再对每个电极的 trial 平均曲线平滑，最后计算簇均值和电极间 SEM。`DISPLAY_SFREQ=100.0`，`BETA_CURVE_SMOOTH_SIGMA_SECONDS=0.10`。额外的 `beta_smoothing_comparison.png` 对比 0.06、0.10、0.15 秒三个 sigma。图中的语音区间经过时长归一化，毫秒轴是按有效 trial 的中位时长映射的显示轴，不代表所有 trial 的真实物理时间。
+
+将 Cell 7 的 `CURVE_UNCERTAINTY` 改为 `"trial_bootstrap"` 可显示逐点 95% trial 重采样区间，`CURVE_BOOTSTRAP_ITERATIONS` 默认 200。此区间固定电极和簇成员，反映 trial 变化，不包括重新选择 K 或电极归类的不确定性，也不是全曲线同时置信带。
+
+完整数值与绘图验证可运行 `python scripts/verify_beta_optimization.py --mode inprocess`，在当前 Python 环境中顺序执行 Notebook 的分析 cell，关闭验证副本中的复审和三维弹窗，采用 Agg 后端导出图。结果保存在 `outputs/optimization_verification/`，不会覆盖正常分析输出或修改原 Notebook 的交互设置。若环境支持 Jupyter 内核，也可使用 `--mode kernel --kernel ecog_lr_v1`。
 
 ```python
 from visualization import (

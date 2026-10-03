@@ -13,7 +13,7 @@ from matplotlib import pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from numpy.typing import ArrayLike, NDArray
-from scipy.ndimage import gaussian_filter1d
+from signal_processing import finite_mean, gaussian_smooth_nan, resample_on_axis
 
 if TYPE_CHECKING:
     from audio_cross_3band_utils import BandPowerEpochs, BetaProgressEpochs
@@ -33,37 +33,6 @@ class BadChannelReview:
     bad_clusters: tuple[int, ...]
     manual_bads: tuple[str, ...]
     n_clusters: int
-
-
-def gaussian_smooth_nan(
-    values: ArrayLike,
-    sfreq: float,
-    *,
-    sigma_seconds: float = 0.060,
-    axis: int = -1,
-) -> FloatArray:
-    """Gaussian-smooth while preventing NaNs from contaminating neighboring data.
-
-    ``sigma_seconds`` is the Gaussian standard deviation, not the full kernel
-    width. The normalized-convolution result is intended only for display.
-    """
-
-    array = np.asarray(values, dtype=float)
-    if sfreq <= 0 or sigma_seconds < 0:
-        raise ValueError("sfreq must be positive and sigma_seconds non-negative.")
-    if sigma_seconds == 0:
-        return array.copy()
-    sigma_samples = sigma_seconds * sfreq
-    finite = np.isfinite(array)
-    numerator = gaussian_filter1d(
-        np.where(finite, array, 0.0), sigma=sigma_samples, axis=axis, mode="nearest"
-    )
-    denominator = gaussian_filter1d(
-        finite.astype(float), sigma=sigma_samples, axis=axis, mode="nearest"
-    )
-    result = np.full_like(numerator, np.nan, dtype=float)
-    np.divide(numerator, denominator, out=result, where=denominator > 1e-12)
-    return result
 
 
 def cluster_color(label: int) -> str:
@@ -124,17 +93,34 @@ def plot_pca_clusters(
     return figure, ax
 
 
-def _mean_sem_by_electrode(data: FloatArray) -> tuple[FloatArray, FloatArray, int]:
+def _mean_sem_by_electrode(data: FloatArray, *, sfreq: float = 1.0, sigma_seconds: float = 0.0) -> tuple[FloatArray, FloatArray, int]:
     """Average trials first, then return mean and SEM across electrodes."""
 
-    electrode_curves = np.nanmean(data, axis=0)
+    electrode_curves = gaussian_smooth_nan(finite_mean(data), sfreq, sigma_seconds=sigma_seconds)
     count = electrode_curves.shape[0]
-    mean = np.nanmean(electrode_curves, axis=0)
+    mean = finite_mean(electrode_curves)
     if count <= 1:
         sem = np.zeros_like(mean)
     else:
-        sem = np.nanstd(electrode_curves, axis=0, ddof=1) / np.sqrt(count)
+        valid_count = np.isfinite(electrode_curves).sum(axis=0)
+        squared = np.nansum((electrode_curves - mean) ** 2, axis=0)
+        variance = np.full_like(mean, np.nan)
+        np.divide(squared, valid_count - 1, out=variance, where=valid_count > 1)
+        sem = np.sqrt(variance / np.maximum(valid_count, 1))
     return mean, sem, count
+
+
+def _trial_bootstrap_band(data, *, sfreq, sigma_seconds, iterations, random_state):
+    """Pointwise 95% intervals conditional on the selected electrodes/labels."""
+    if data.shape[0] < 2 or not isinstance(iterations, (int, np.integer)) or iterations < 2:
+        raise ValueError("Trial bootstrap requires >=2 trials and >=2 iterations.")
+    rng = np.random.default_rng(random_state)
+    smoothed = gaussian_smooth_nan(data, sfreq, sigma_seconds=sigma_seconds)
+    curves = np.empty((iterations, data.shape[-1]))
+    for iteration in range(iterations):
+        indices = rng.integers(0, data.shape[0], size=data.shape[0])
+        curves[iteration] = finite_mean(finite_mean(smoothed[indices]))
+    return np.nanpercentile(curves, [2.5, 97.5], axis=0)
 
 
 def plot_cluster_dynamics(
@@ -189,9 +175,7 @@ def plot_cluster_dynamics(
             selected = label_array == label
             if not np.any(selected):
                 continue
-            mean, sem, count = _mean_sem_by_electrode(values[:, selected, :])
-            smooth_mean = gaussian_smooth_nan(mean, epochs.sfreq, sigma_seconds=sigma_seconds)
-            smooth_sem = gaussian_smooth_nan(sem, epochs.sfreq, sigma_seconds=sigma_seconds)
+            smooth_mean, smooth_sem, count = _mean_sem_by_electrode(values[:, selected, :], sfreq=epochs.sfreq, sigma_seconds=sigma_seconds)
             color = cluster_color(label)
             display = "Bad" if label == -1 else f"Cluster {label} (n={count})"
             axis.plot(times, smooth_mean, color=color, linewidth=1.8, label=display)
@@ -302,9 +286,7 @@ def plot_beta_progress_cluster_dynamics(
             selected = label_array == label
             if not np.any(selected):
                 continue
-            mean, sem, count = _mean_sem_by_electrode(beta_values[:, selected, :])
-            mean = gaussian_smooth_nan(mean, display_sfreq, sigma_seconds=sigma_seconds)
-            sem = gaussian_smooth_nan(sem, display_sfreq, sigma_seconds=sigma_seconds)
+            mean, sem, count = _mean_sem_by_electrode(beta_values[:, selected, :], sfreq=display_sfreq, sigma_seconds=sigma_seconds)
             beta_slope = np.gradient(mean, axis_values)
             interaction = beta_slope * audio_slope
             color = cluster_color(label)
@@ -447,34 +429,27 @@ def _display_sfreq(axis_values: ArrayLike, *, seconds_per_axis_unit: float = 1.0
 
 def _concat_beta_progress_display(
     epochs: "BetaProgressEpochs",
+    *,
+    display_sfreq: float | None = None,
 ) -> tuple[FloatArray, FloatArray, FloatArray, float]:
     """Concatenate pre, normalized speech, and post on a display-time axis."""
 
     median_duration = _median_event_duration(epochs)
-    speech_seconds = epochs.progress_percent / 100.0 * median_duration
-    x_axis = np.concatenate(
-        [
-            epochs.pre_times[:-1],
-            speech_seconds,
-            median_duration + epochs.post_times[1:],
-        ]
+    rate = min(float(epochs.sfreq), 100.0) if display_sfreq is None else float(display_sfreq)
+    if not np.isfinite(rate) or rate <= 0:
+        raise ValueError("display_sfreq must be finite and positive.")
+    start, stop = float(epochs.pre_times[0]), median_duration + float(epochs.post_times[-1])
+    x_axis = np.linspace(start, stop, max(3, int(round((stop - start) * rate)) + 1))
+    beta = np.full(epochs.speech.shape[:2] + (len(x_axis),), np.nan)
+    audio = np.full((len(epochs.events), len(x_axis)), np.nan)
+    segments = (
+        (x_axis < 0, epochs.pre_times, epochs.pre, epochs.audio_pre),
+        ((x_axis >= 0) & (x_axis <= median_duration), epochs.progress_percent / 100 * median_duration, epochs.speech, epochs.audio_speech),
+        (x_axis > median_duration, median_duration + epochs.post_times, epochs.post, epochs.audio_post),
     )
-    beta = np.concatenate(
-        [
-            epochs.pre[:, :, :-1],
-            epochs.speech,
-            epochs.post[:, :, 1:],
-        ],
-        axis=2,
-    )
-    audio = np.concatenate(
-        [
-            epochs.audio_pre[:, :-1],
-            epochs.audio_speech,
-            epochs.audio_post[:, 1:],
-        ],
-        axis=1,
-    )
+    for mask, source, beta_segment, audio_segment in segments:
+        beta[..., mask] = resample_on_axis(beta_segment, source, x_axis[mask])
+        audio[..., mask] = resample_on_axis(audio_segment, source, x_axis[mask])
     return x_axis, beta, audio, median_duration
 
 
@@ -485,6 +460,10 @@ def plot_beta_cluster_grid(
     include_bad: bool = False,
     max_columns: int = 5,
     sigma_seconds: float = 0.0,
+    display_sfreq: float | None = None,
+    uncertainty: str = "sem",
+    bootstrap_iterations: int = 200,
+    random_state: int = 50,
     figure: Figure | None = None,
 ) -> tuple[Figure, NDArray[Any]]:
     """Plot one beta-only cluster panel per cluster with audio overlay.
@@ -501,6 +480,8 @@ def plot_beta_cluster_grid(
         raise ValueError("labels must align one-to-one with epoch channels.")
     if max_columns < 1:
         raise ValueError("max_columns must be positive.")
+    if uncertainty not in {"sem", "trial_bootstrap"}:
+        raise ValueError("uncertainty must be 'sem' or 'trial_bootstrap'.")
 
     shown_labels = [int(value) for value in np.unique(label_array) if include_bad or value != -1]
     if not shown_labels:
@@ -529,10 +510,10 @@ def plot_beta_cluster_grid(
             dtype=object,
         )
 
-    x_axis, beta_values, audio_values, median_duration = _concat_beta_progress_display(epochs)
+    x_axis, beta_values, audio_values, median_duration = _concat_beta_progress_display(epochs, display_sfreq=display_sfreq)
     display_sfreq = _display_sfreq(x_axis)
     audio_mean = gaussian_smooth_nan(
-        np.nanmean(audio_values, axis=0),
+        finite_mean(audio_values),
         display_sfreq,
         sigma_seconds=sigma_seconds,
     )
@@ -544,13 +525,17 @@ def plot_beta_cluster_grid(
     for axis_index, label in enumerate(shown_labels):
         axis: Axes = flat_axes[axis_index]
         selected = label_array == label
-        mean, sem, count = _mean_sem_by_electrode(beta_values[:, selected, :])
-        mean = gaussian_smooth_nan(mean, display_sfreq, sigma_seconds=sigma_seconds)
-        sem = gaussian_smooth_nan(sem, display_sfreq, sigma_seconds=sigma_seconds)
+        mean, sem, count = _mean_sem_by_electrode(beta_values[:, selected, :], sfreq=display_sfreq, sigma_seconds=sigma_seconds)
+        lower, upper = mean - sem, mean + sem
+        if uncertainty == "trial_bootstrap":
+            lower, upper = _trial_bootstrap_band(
+                beta_values[:, selected, :], sfreq=display_sfreq, sigma_seconds=sigma_seconds,
+                iterations=bootstrap_iterations, random_state=random_state,
+            )
         color = cluster_color(label)
         title = "Bad" if label == -1 else f"Cluster {label}"
         axis.plot(x_ms, mean, color=color, linewidth=2.2)
-        axis.fill_between(x_ms, mean - sem, mean + sem, color=color, alpha=0.22, linewidth=0)
+        axis.fill_between(x_ms, lower, upper, color=color, alpha=0.22, linewidth=0)
         axis.axvline(onset_ms, color="black", linewidth=0.8, linestyle="--")
         axis.axvline(offset_ms, color="black", linewidth=0.8, linestyle="--")
         axis.axhline(0.0, color="black", linewidth=0.5, alpha=0.35)
@@ -558,7 +543,7 @@ def plot_beta_cluster_grid(
         axis.axvspan(offset_ms, x_ms[-1], color="gray", alpha=0.08, linewidth=0)
         axis.set_title(f"{title}\n(n={count})", fontsize=11, fontweight="bold")
         axis.set_ylabel("Beta\nECoG Z")
-        axis.set_xlabel("Time from speech onset (ms)")
+        axis.set_xlabel("Duration-normalized time (ms)")
 
         audio_axis = axis.twinx()
         audio_axis.plot(x_ms, audio_mean, color="orange", linewidth=1.4, alpha=0.85)
@@ -587,6 +572,52 @@ def plot_beta_cluster_grid(
 
     for unused_axis in flat_axes[len(shown_labels):]:
         unused_axis.set_visible(False)
+    return figure, axes
+
+
+def plot_beta_smoothing_comparison(epochs, labels, *, sigma_values=(0.06, 0.10, 0.15), display_sfreq=None):
+    """Compare physical smoothing widths with fixed cluster memberships."""
+    label_array = np.asarray(labels, dtype=int)
+    if label_array.shape != (len(epochs.channel_names),):
+        raise ValueError("labels must align with channels.")
+    if not sigma_values or any(not np.isfinite(value) or value < 0 for value in sigma_values):
+        raise ValueError("sigma_values must contain finite non-negative values.")
+    x_axis, values, audio, duration = _concat_beta_progress_display(epochs, display_sfreq=display_sfreq)
+    rate = _display_sfreq(x_axis)
+    figure, axes = plt.subplots(1, len(sigma_values), figsize=(5 * len(sigma_values), 3.5), sharex=True, sharey=True, squeeze=False, constrained_layout=True)
+    for axis, sigma in zip(axes[0], sigma_values, strict=True):
+        for label in np.unique(label_array[label_array >= 0]):
+            mean, sem, count = _mean_sem_by_electrode(values[:, label_array == label], sfreq=rate, sigma_seconds=sigma)
+            axis.plot(x_axis * 1000, mean, color=cluster_color(int(label)), label=f"Cluster {label} (n={count})")
+            axis.fill_between(x_axis * 1000, mean - sem, mean + sem, color=cluster_color(int(label)), alpha=0.15)
+        axis.axvline(0, color="black", linestyle="--", linewidth=0.8)
+        axis.axvline(duration * 1000, color="black", linestyle="--", linewidth=0.8)
+        axis.set_title(f"Gaussian sigma = {sigma * 1000:g} ms")
+        axis.set_xlabel("Duration-normalized display time (ms)")
+    axes[0, 0].set_ylabel("Beta Z power")
+    axes[0, -1].legend(fontsize=8)
+    return figure, axes
+
+
+def plot_cluster_stability(summary):
+    """Plot separation, trial stability and waveform agreement for candidate K."""
+    required = {"k", "silhouette", "split_half_ari_mean", "bootstrap_ari_mean", "waveform_correlation_mean"}
+    if not required.issubset(summary.columns):
+        raise ValueError(f"Stability summary is missing: {sorted(required - set(summary.columns))}")
+    figure, axes = plt.subplots(1, 3, figsize=(12, 3.5), constrained_layout=True)
+    k = summary["k"].to_numpy()
+    axes[0].plot(k, summary["silhouette"], "o-", color="teal")
+    axes[0].set_ylabel("Silhouette")
+    axes[1].errorbar(k, summary["split_half_ari_mean"], yerr=summary.get("split_half_ari_std"), marker="o", label="Split-half")
+    axes[1].errorbar(k, summary["bootstrap_ari_mean"], yerr=summary.get("bootstrap_ari_std"), marker="s", label="Trial bootstrap")
+    axes[1].set_ylabel("Adjusted Rand index")
+    axes[1].legend(fontsize=8)
+    axes[2].plot(k, summary["waveform_correlation_mean"], "o-", color="crimson")
+    axes[2].set_ylabel("Within-cluster waveform correlation")
+    for axis in axes:
+        axis.set_xticks(k)
+        axis.set_xlabel("Number of clusters (K)")
+        axis.grid(axis="y", alpha=0.2)
     return figure, axes
 
 
@@ -1225,6 +1256,8 @@ __all__ = [
     "gaussian_smooth_nan",
     "load_electrode_coordinates",
     "plot_beta_cluster_grid",
+    "plot_beta_smoothing_comparison",
+    "plot_cluster_stability",
     "plot_beta_progress_cluster_dynamics",
     "plot_cluster_dynamics",
     "plot_pca_clusters",

@@ -63,7 +63,7 @@ class TwoRoundClusteringResult:
 def infer_feature_columns(
     feature_table: pd.DataFrame,
     *,
-    excluded: Iterable[str] = ("channel", "is_bad", "label", "pc1", "pc2", "pc3"),
+    excluded: Iterable[str] = ("channel", "is_bad", "label", "pc1", "pc2", "pc3", "baseline_invalid_fraction", "valid_trial_count"),
 ) -> tuple[str, ...]:
     """Select numeric feature columns while excluding metadata columns."""
 
@@ -124,6 +124,8 @@ def default_beta_progress_feature_weights(
     beta_slope_weight: float = 1.8,
     energy_weight: float = 0.35,
     default_weight: float = 1.0,
+    morphology_weight: float = 3.0,
+    normalize_groups: bool = False,
 ) -> dict[str, float]:
     """Return interpretable default weights for beta-progress features.
 
@@ -150,16 +152,78 @@ def default_beta_progress_feature_weights(
         "duration_slope_audio",
     )
     weights: dict[str, float] = {}
+    groups: dict[str, str] = {}
+    morphology_tokens = (
+        "early_mean", "middle_mean", "late_mean", "middle_minus_early", "late_minus_middle",
+        "positive_auc", "negative_auc", "positive_peak", "negative_peak", "dominant_peak_width",
+        "offset_rebound", "late_to_post_change",
+    )
     for column in feature_columns:
-        if any(token in column for token in interaction_tokens):
+        if any(token in column for token in morphology_tokens):
+            weights[str(column)] = morphology_weight
+            groups[str(column)] = "morphology"
+        elif any(token in column for token in interaction_tokens):
             weights[str(column)] = slope_audio_weight
+            groups[str(column)] = "audio"
         elif "beta_slope" in column:
             weights[str(column)] = beta_slope_weight
+            groups[str(column)] = "slope"
         elif any(token in column for token in energy_tokens):
             weights[str(column)] = energy_weight
+            groups[str(column)] = "energy"
         else:
             weights[str(column)] = default_weight
+            groups[str(column)] = "other"
+    if normalize_groups:
+        for column in weights:
+            weights[column] /= sum(group == groups[column] for group in groups.values())
     return weights
+
+
+def select_beta_progress_feature_columns(
+    feature_table: pd.DataFrame,
+    *,
+    bad_mask: NDArray[np.bool_] | None = None,
+    correlation_threshold: float = 0.95,
+) -> tuple[str, ...]:
+    """Select nonconstant, nonredundant predictors using good electrodes only."""
+    if not 0 < correlation_threshold <= 1:
+        raise ValueError("correlation_threshold must lie in (0, 1].")
+    clean = ~feature_table.get("is_bad", pd.Series(False, index=feature_table.index)).fillna(False).to_numpy(bool)
+    if bad_mask is not None:
+        clean &= ~_validate_bad_mask(np.asarray(bad_mask, dtype=bool), len(feature_table))
+    columns = infer_feature_columns(feature_table)
+    priority = (
+        "early_mean", "middle_mean", "late_mean", "positive_peak_percent", "negative_peak_percent",
+        "dominant_peak_width_percent", "offset_rebound", "positive_auc", "negative_auc",
+        "audio_slope_corr", "audio_slope_xcorr_lag_percent", "trialwise_slope_audio_corr_mean",
+    )
+    def feature_priority(column):
+        suffix = column.split("__")[-1]
+        return priority.index(suffix) if suffix in priority else len(priority)
+    candidates = sorted(columns, key=feature_priority)
+    selected: list[str] = []
+    clean_frame = feature_table.loc[clean, list(candidates)].replace([np.inf, -np.inf], np.nan)
+    for column in candidates:
+        values = clean_frame[column].dropna().to_numpy(float)
+        if len(values) < max(3, int(np.ceil(clean.sum() / 2))):
+            continue
+        scale = max(float(np.max(np.abs(values))), np.finfo(float).tiny)
+        if np.ptp(values) <= scale * 1e-10:
+            continue
+        duplicate = False
+        for previous in selected:
+            pair = clean_frame[[column, previous]].dropna()
+            if len(pair) >= 3:
+                correlation = pair.corr().iloc[0, 1]
+                if np.isfinite(correlation) and abs(correlation) >= correlation_threshold:
+                    duplicate = True
+                    break
+        if not duplicate:
+            selected.append(column)
+    if not selected:
+        raise ValueError("No nonconstant beta features remain among clean electrodes.")
+    return tuple(selected)
 
 
 def cluster_electrodes(
@@ -210,7 +274,8 @@ def cluster_electrodes(
         raise ValueError(f"Unknown feature columns: {missing}")
     raw_clean = feature_table.loc[clean_mask, list(requested_columns)].apply(
         pd.to_numeric, errors="coerce"
-    ).to_numpy(dtype=float)
+    ).to_numpy(dtype=float, copy=True)
+    raw_clean[~np.isfinite(raw_clean)] = np.nan
     usable = ~np.all(np.isnan(raw_clean), axis=0)
     if not np.any(usable):
         raise ValueError("Every requested feature is missing among clean electrodes.")
@@ -378,4 +443,5 @@ __all__ = [
     "infer_feature_columns",
     "refit_after_bad_channel_review",
     "run_two_round_clustering",
+    "select_beta_progress_feature_columns",
 ]

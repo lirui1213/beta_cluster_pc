@@ -16,7 +16,16 @@ import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 from scipy.io import wavfile
-from scipy.signal import butter, sosfiltfilt
+from scipy.signal import butter, peak_widths, sosfiltfilt
+
+from signal_processing import (
+    baseline_statistics,
+    curve_slope,
+    finite_mean,
+    gaussian_smooth_nan,
+    normalize_power,
+    resample_on_axis,
+)
 
 
 FloatArray = NDArray[np.float64]
@@ -61,6 +70,7 @@ class BandPowerEpochs:
     bad_channels: frozenset[str]
     sfreq: float
     effective_bands: Mapping[str, tuple[float, float]]
+    baseline_diagnostics: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +101,21 @@ class BetaProgressEpochs:
     sfreq: float
     beta_band: tuple[float, float]
     pre_post_window: float
+    baseline_diagnostics: pd.DataFrame | None = None
+
+
+def _baseline_quality_table(events, channels, mean, std, floor, invalid, *, band="beta"):
+    trial_ids = events.get("original_trial_id", pd.Series(np.arange(len(events)))).to_numpy()
+    return pd.DataFrame({
+        "original_trial_id": np.repeat(trial_ids, len(channels)),
+        "channel": np.tile(channels, len(events)),
+        "band": band,
+        "baseline_mean": mean.ravel(),
+        "baseline_std": std.ravel(),
+        "denominator_floor": floor.ravel(),
+        "is_low_variance": invalid.ravel(),
+        "valid": (~invalid).ravel(),
+    })
 
 
 def load_ecog_fif(path: str | Path, *, preload: bool = False) -> Any:
@@ -389,8 +414,10 @@ def _sample_trial_progress(
     output = np.empty((len(onset), data.shape[0], len(progress_fraction)), dtype=float)
     for trial_index, (start, stop) in enumerate(zip(onset, offset, strict=True)):
         targets = start + progress_fraction * (stop - start)
-        for channel_index, channel_data in enumerate(data):
-            output[trial_index, channel_index] = np.interp(targets, sample_times, channel_data)
+        padding = 10 * float(np.median(np.diff(targets)))
+        left = max(0, int(np.searchsorted(sample_times, start - padding)) - 1)
+        right = min(len(sample_times), int(np.searchsorted(sample_times, stop + padding)) + 1)
+        output[trial_index] = resample_on_axis(data[:, left:right], sample_times[left:right], targets)
     return output
 
 
@@ -423,7 +450,7 @@ def _articulation_means(
     offset: FloatArray,
     baseline_mean: FloatArray,
     baseline_std: FloatArray,
-    epsilon: float,
+    invalid_baseline: NDArray[np.bool_],
 ) -> FloatArray:
     result = np.empty((len(onset), power.shape[0]), dtype=float)
     for trial_index, (start, stop) in enumerate(zip(onset, offset, strict=True)):
@@ -433,9 +460,9 @@ def _articulation_means(
             values = np.vstack([np.interp(midpoint, sample_times, row) for row in power])[:, 0]
         else:
             values = np.mean(power[:, mask], axis=1)
-        result[trial_index] = (values - baseline_mean[trial_index]) / (
-            baseline_std[trial_index] + epsilon
-        )
+        result[trial_index] = np.nan
+        valid = ~invalid_baseline[trial_index]
+        np.divide(values - baseline_mean[trial_index], baseline_std[trial_index], out=result[trial_index], where=valid)
     return result
 
 
@@ -448,7 +475,8 @@ def extract_three_band_power_epochs(
     offset_window: tuple[float, float] | None = OFFSET_WINDOW,
     baseline_window: tuple[float, float] = BASELINE_WINDOW,
     picks: Any = "data",
-    epsilon: float = 1e-6,
+    epsilon: float | None = None,
+    baseline_relative_floor: float = 1e-3,
     filter_kwargs: Mapping[str, Any] | None = None,
 ) -> BandPowerEpochs:
     """Filter continuous ECoG, compute Hilbert power, epoch, and baseline-Z it.
@@ -461,8 +489,8 @@ def extract_three_band_power_epochs(
     required_columns = {"onset", "offset", "duration"}
     if not required_columns.issubset(events.columns):
         raise ValueError(f"Events must contain columns {sorted(required_columns)}.")
-    if epsilon <= 0:
-        raise ValueError("epsilon must be positive.")
+    if epsilon is not None and (not np.isfinite(epsilon) or epsilon <= 0):
+        raise ValueError("epsilon must be positive or None.")
 
     sfreq = float(raw.info["sfreq"])
     effective_bands = resolve_frequency_bands(sfreq, bands)
@@ -489,6 +517,7 @@ def extract_three_band_power_epochs(
     onset_epochs: dict[str, FloatArray] = {}
     offset_epochs: dict[str, FloatArray] = {}
     articulation: dict[str, FloatArray] = {}
+    quality_tables = []
     kwargs = dict(filter_kwargs or {})
     kwargs.pop("phase", None)
     kwargs.pop("verbose", None)
@@ -502,14 +531,15 @@ def extract_three_band_power_epochs(
 
         onset_unscaled = _sample_continuous(power, sample_times, onset, onset_times)
         baseline = onset_unscaled[:, :, baseline_mask]
-        baseline_mean = np.mean(baseline, axis=-1)
-        baseline_std = np.std(baseline, axis=-1, ddof=0)
-        denominator = baseline_std[:, :, None] + epsilon
-        onset_epochs[name] = (onset_unscaled - baseline_mean[:, :, None]) / denominator
+        baseline_mean, baseline_std, floor, invalid = baseline_statistics(
+            baseline, relative_floor=baseline_relative_floor, absolute_floor=epsilon,
+        )
+        quality_tables.append(_baseline_quality_table(valid_events, channel_names, baseline_mean, baseline_std, floor, invalid, band=name))
+        onset_epochs[name] = normalize_power(onset_unscaled, baseline_mean, baseline_std, invalid)
 
         if offset_times is not None:
             offset_unscaled = _sample_continuous(power, sample_times, offset, offset_times)
-            offset_epochs[name] = (offset_unscaled - baseline_mean[:, :, None]) / denominator
+            offset_epochs[name] = normalize_power(offset_unscaled, baseline_mean, baseline_std, invalid)
         articulation[name] = _articulation_means(
             power,
             sample_times,
@@ -517,7 +547,7 @@ def extract_three_band_power_epochs(
             offset,
             baseline_mean,
             baseline_std,
-            epsilon,
+            invalid,
         )
 
     return BandPowerEpochs(
@@ -531,6 +561,7 @@ def extract_three_band_power_epochs(
         bad_channels=bad_channels,
         sfreq=sfreq,
         effective_bands=effective_bands,
+        baseline_diagnostics=pd.concat(quality_tables, ignore_index=True),
     )
 
 
@@ -615,7 +646,8 @@ def extract_beta_progress_epochs(
     min_trials_after_filter: int = 3,
     pre_post_window: float | None = None,
     picks: Any = "data",
-    epsilon: float = 1e-6,
+    epsilon: float | None = None,
+    baseline_relative_floor: float = 1e-3,
     filter_kwargs: Mapping[str, Any] | None = None,
 ) -> BetaProgressEpochs:
     """Extract beta power on a normalized speech-progress time base.
@@ -628,8 +660,8 @@ def extract_beta_progress_epochs(
 
     if progress_points < 3:
         raise ValueError("progress_points must be at least three.")
-    if epsilon <= 0:
-        raise ValueError("epsilon must be positive.")
+    if epsilon is not None and (not np.isfinite(epsilon) or epsilon <= 0):
+        raise ValueError("epsilon must be positive or None.")
     required_columns = {"onset", "offset", "duration"}
     if not required_columns.issubset(events.columns):
         raise ValueError(f"Events must contain columns {sorted(required_columns)}.")
@@ -698,12 +730,12 @@ def extract_beta_progress_epochs(
     speech_unscaled = _sample_trial_progress(power, sample_times, onset, offset, progress_fraction)
     post_unscaled = _sample_continuous(power, sample_times, offset, post_times)
 
-    baseline_mean = np.mean(pre_unscaled, axis=-1)
-    baseline_std = np.std(pre_unscaled, axis=-1, ddof=0)
-    denominator = baseline_std[:, :, None] + epsilon
-    pre = (pre_unscaled - baseline_mean[:, :, None]) / denominator
-    speech = (speech_unscaled - baseline_mean[:, :, None]) / denominator
-    post = (post_unscaled - baseline_mean[:, :, None]) / denominator
+    baseline_mean, baseline_std, floor, invalid = baseline_statistics(
+        pre_unscaled, relative_floor=baseline_relative_floor, absolute_floor=epsilon,
+    )
+    pre = normalize_power(pre_unscaled, baseline_mean, baseline_std, invalid)
+    speech = normalize_power(speech_unscaled, baseline_mean, baseline_std, invalid)
+    post = normalize_power(post_unscaled, baseline_mean, baseline_std, invalid)
 
     audio_speech = _sample_audio_trial_progress(audio_envelope, valid_events, progress_fraction)
     audio_pre = align_audio_to_epochs(audio_envelope, valid_events, pre_times, alignment="onset")
@@ -726,6 +758,7 @@ def extract_beta_progress_epochs(
         sfreq=sfreq,
         beta_band=(beta_low, beta_high),
         pre_post_window=window,
+        baseline_diagnostics=_baseline_quality_table(valid_events, channel_names, baseline_mean, baseline_std, floor, invalid),
     )
 
 
@@ -863,31 +896,64 @@ def _zscore_vector(values: FloatArray) -> FloatArray:
     return result
 
 
+def _prepare_beta_progress_curves(epochs, *, smoothing_sigma_seconds, slope_method):
+    progress = epochs.progress_percent
+    step = float(np.median(np.diff(progress)))
+    speech, audio, beta_slopes, audio_slopes = [], [], [], []
+    for trial, audio_trial, duration in zip(epochs.speech, epochs.audio_speech, epochs.events["duration"], strict=True):
+        scale = float(duration) / 100.0
+        rate = 1.0 / (step * scale)
+        smooth_beta = gaussian_smooth_nan(trial, rate, sigma_seconds=smoothing_sigma_seconds)
+        smooth_audio = gaussian_smooth_nan(audio_trial, rate, sigma_seconds=smoothing_sigma_seconds)
+        options = dict(sigma_seconds=smoothing_sigma_seconds, seconds_per_axis_unit=scale, method=slope_method)
+        speech.append(smooth_beta)
+        audio.append(smooth_audio)
+        beta_slopes.append(curve_slope(smooth_beta, progress, **options))
+        audio_slopes.append(curve_slope(smooth_audio, progress, **options))
+    return tuple(np.asarray(values) for values in (speech, audio, beta_slopes, audio_slopes))
+
+
 def _beta_progress_channel_features(
     epochs: BetaProgressEpochs,
     channel_index: int,
     *,
     max_lag_percent: float = 20.0,
+    smoothing_sigma_seconds: float = 0.06,
+    slope_method: str = "savgol",
+    processed_curves: tuple | None = None,
 ) -> dict[str, float]:
-    speech_trials = np.asarray(epochs.speech[:, channel_index, :], dtype=float)
-    mean_curve = np.nanmean(speech_trials, axis=0)
     progress = epochs.progress_percent
-    audio_mean = np.nanmean(epochs.audio_speech, axis=0)
-    beta_slope = np.gradient(mean_curve, progress)
-    audio_slope = np.gradient(audio_mean, progress)
+    durations = epochs.events["duration"].to_numpy(float)
+    step = float(np.nanmedian(np.diff(progress)))
+    if processed_curves is None:
+        processed_curves = _prepare_beta_progress_curves(epochs, smoothing_sigma_seconds=smoothing_sigma_seconds, slope_method=slope_method)
+    speech_trials, audio_trials, trial_beta_slopes, trial_audio_slopes = processed_curves
+    trialwise_corr = [_safe_pearson(beta, audio) for beta, audio in zip(trial_beta_slopes[:, channel_index], trial_audio_slopes, strict=True)]
+    mean_curve = finite_mean(speech_trials[:, channel_index])
+    paired_trials = np.isfinite(epochs.speech[:, channel_index]).all(axis=-1) & np.isfinite(epochs.audio_speech).all(axis=-1)
+    audio_mean = finite_mean(audio_trials[paired_trials])
+    paired_beta_mean = finite_mean(speech_trials[paired_trials, channel_index])
+    slope_kwargs = dict(sigma_seconds=smoothing_sigma_seconds, seconds_per_axis_unit=float(np.median(durations)) / 100.0, method=slope_method)
+    beta_slope = curve_slope(mean_curve, progress, **slope_kwargs)
+    paired_slope_kwargs = dict(slope_kwargs)
+    if paired_trials.any():
+        paired_slope_kwargs["seconds_per_axis_unit"] = float(np.median(durations[paired_trials])) / 100.0
+    coupling_beta_slope = curve_slope(paired_beta_mean, progress, **paired_slope_kwargs)
+    audio_slope = curve_slope(audio_mean, progress, **paired_slope_kwargs)
     step = float(np.nanmedian(np.diff(progress)))
     max_lag_steps = int(round(max_lag_percent / step)) if step > 0 else 0
     slope_xcorr, slope_xcorr_lag = _max_normalized_xcorr_steps(
-        beta_slope, audio_slope, step, max_lag_steps
+        coupling_beta_slope, audio_slope, step, max_lag_steps
     )
 
-    product = beta_slope * audio_slope
+    product = coupling_beta_slope * audio_slope
     finite_product = np.isfinite(product)
     same_sign = (
-        np.sign(beta_slope) == np.sign(audio_slope)
-    ) & np.isfinite(beta_slope) & np.isfinite(audio_slope)
-    audio_rising = audio_slope >= np.nanpercentile(audio_slope, 75.0)
-    audio_falling = audio_slope <= np.nanpercentile(audio_slope, 25.0)
+        np.sign(coupling_beta_slope) == np.sign(audio_slope)
+    ) & np.isfinite(coupling_beta_slope) & np.isfinite(audio_slope)
+    audio_quartiles = np.nanpercentile(audio_slope, [25, 75]) if np.isfinite(audio_slope).any() else (np.nan, np.nan)
+    audio_rising = audio_slope >= audio_quartiles[1]
+    audio_falling = audio_slope <= audio_quartiles[0]
 
     finite_peak = np.isfinite(mean_curve)
     if finite_peak.any():
@@ -905,7 +971,7 @@ def _beta_progress_channel_features(
     else:
         slope_peak, slope_peak_percent = np.nan, np.nan
 
-    beta_slope_z = _zscore_vector(beta_slope)
+    beta_slope_z = _zscore_vector(coupling_beta_slope)
     audio_slope_z = _zscore_vector(audio_slope)
     crossing_count, first_crossing_index = _count_curve_crossings(beta_slope_z, audio_slope_z)
     first_crossing_percent = (
@@ -914,16 +980,7 @@ def _beta_progress_channel_features(
         else np.nan
     )
 
-    trialwise_corr = np.asarray(
-        [
-            _safe_pearson(
-                np.gradient(trial_curve, progress),
-                np.gradient(audio_curve, progress),
-            )
-            for trial_curve, audio_curve in zip(speech_trials, epochs.audio_speech, strict=True)
-        ],
-        dtype=float,
-    )
+    trialwise_corr = np.asarray(trialwise_corr, dtype=float)
 
     finite_auc = np.isfinite(mean_curve) & np.isfinite(progress)
     energy_auc = (
@@ -931,10 +988,43 @@ def _beta_progress_channel_features(
         if np.count_nonzero(finite_auc) >= 2
         else np.nan
     )
-    pre_mean = _safe_mean(np.nanmean(epochs.pre[:, channel_index, :], axis=0))
-    post_mean = _safe_mean(np.nanmean(epochs.post[:, channel_index, :], axis=0))
+    pre_mean = _safe_mean(finite_mean(epochs.pre[:, channel_index, :]))
+    post_curve = finite_mean(epochs.post[:, channel_index, :])
+    post_mean = _safe_mean(post_curve)
+    early_mean = _safe_mean(mean_curve[progress < 100 / 3])
+    middle_mean = _safe_mean(mean_curve[(progress >= 100 / 3) & (progress < 200 / 3)])
+    late_mean = _safe_mean(mean_curve[progress >= 200 / 3])
+    dominant_width = np.nan
+    positive_peak = negative_peak = np.nan
+    positive_peak_percent = negative_peak_percent = np.nan
+    if finite_peak.any():
+        positive_peak = max(0.0, float(np.nanmax(mean_curve)))
+        negative_peak = min(0.0, float(np.nanmin(mean_curve)))
+        if positive_peak > 0:
+            positive_peak_percent = float(progress[int(np.nanargmax(mean_curve))])
+        if negative_peak < 0:
+            negative_peak_percent = float(progress[int(np.nanargmin(mean_curve))])
+        absolute_curve = np.abs(mean_curve)
+        if 0 < peak_index < len(mean_curve) - 1 and absolute_curve[peak_index] > 0:
+            dominant_width = float(peak_widths(absolute_curve, [peak_index], rel_height=0.5)[0][0] * step)
+        else:
+            dominant_width = 0.0
 
     return {
+        "early_mean": early_mean,
+        "middle_mean": middle_mean,
+        "late_mean": late_mean,
+        "middle_minus_early": middle_mean - early_mean,
+        "late_minus_middle": late_mean - middle_mean,
+        "positive_auc": _trapezoidal_integral(np.maximum(mean_curve[finite_auc], 0), progress[finite_auc]) if finite_auc.sum() >= 2 else np.nan,
+        "negative_auc": _trapezoidal_integral(np.minimum(mean_curve[finite_auc], 0), progress[finite_auc]) if finite_auc.sum() >= 2 else np.nan,
+        "positive_peak_value": positive_peak,
+        "negative_peak_value": negative_peak,
+        "positive_peak_percent": positive_peak_percent,
+        "negative_peak_percent": negative_peak_percent,
+        "dominant_peak_width_percent": dominant_width,
+        "offset_rebound": _safe_mean(post_curve[epochs.post_times <= min(0.3, epochs.pre_post_window)]) - _safe_mean(mean_curve[progress >= 80]),
+        "late_to_post_change": post_mean - late_mean,
         "energy_mean": _safe_mean(mean_curve),
         "energy_std": _safe_std(mean_curve),
         "energy_auc": energy_auc,
@@ -950,17 +1040,17 @@ def _beta_progress_channel_features(
         "beta_slope_std": _safe_std(beta_slope),
         "beta_slope_peak_abs": slope_peak,
         "beta_slope_peak_percent": slope_peak_percent,
-        "audio_slope_corr": _safe_pearson(beta_slope, audio_slope),
-        "audio_slope_reg_slope": _audio_regression_slope(beta_slope, audio_slope),
+        "audio_slope_corr": _safe_pearson(coupling_beta_slope, audio_slope),
+        "audio_slope_reg_slope": _audio_regression_slope(coupling_beta_slope, audio_slope),
         "audio_slope_xcorr": slope_xcorr,
         "audio_slope_xcorr_lag_percent": slope_xcorr_lag,
         "slope_product_mean": _safe_mean(product),
         "slope_product_abs_mean": _safe_mean(np.abs(product[finite_product])),
-        "slope_same_sign_fraction": float(np.mean(same_sign))
-        if np.isfinite(beta_slope).any() and np.isfinite(audio_slope).any()
+        "slope_same_sign_fraction": float(np.mean(same_sign[finite_product]))
+        if finite_product.any()
         else np.nan,
-        "beta_slope_when_audio_rising": _safe_mean(beta_slope[audio_rising]),
-        "beta_slope_when_audio_falling": _safe_mean(beta_slope[audio_falling]),
+        "beta_slope_when_audio_rising": _safe_mean(coupling_beta_slope[audio_rising]),
+        "beta_slope_when_audio_falling": _safe_mean(coupling_beta_slope[audio_falling]),
         "slope_crossing_count": crossing_count,
         "first_slope_crossing_percent": first_crossing_percent,
         "trialwise_slope_audio_corr_mean": _safe_mean(trialwise_corr),
@@ -976,27 +1066,46 @@ def extract_beta_progress_features(
     *,
     max_lag_percent: float = 20.0,
     mask_bad_features: bool = True,
+    smoothing_sigma_seconds: float = 0.06,
+    slope_method: str = "savgol",
+    max_baseline_invalid_fraction: float = 0.25,
 ) -> pd.DataFrame:
     """Build electrode features from beta progress and audio-envelope slopes."""
 
     if max_lag_percent < 0:
         raise ValueError("max_lag_percent must be non-negative.")
+    if not np.isfinite(smoothing_sigma_seconds) or smoothing_sigma_seconds < 0:
+        raise ValueError("smoothing_sigma_seconds must be finite and non-negative.")
+    if slope_method not in {"savgol", "gradient"}:
+        raise ValueError("slope_method must be 'savgol' or 'gradient'.")
+    if not 0 <= max_baseline_invalid_fraction <= 1:
+        raise ValueError("max_baseline_invalid_fraction must lie between zero and one.")
+    if len(epochs.events) == 0 or not np.all(np.isfinite(epochs.events["duration"]) & (epochs.events["duration"] > 0)):
+        raise ValueError("Feature extraction requires trials with finite positive durations.")
     rows: list[dict[str, Any]] = []
+    processed_curves = _prepare_beta_progress_curves(epochs, smoothing_sigma_seconds=smoothing_sigma_seconds, slope_method=slope_method)
     for channel_index, channel_name in enumerate(epochs.channel_names):
-        is_bad = channel_name in epochs.bad_channels
+        valid_trials = np.isfinite(epochs.speech[:, channel_index, :]).all(axis=-1)
+        invalid_fraction = float(1 - valid_trials.mean())
+        is_bad = channel_name in epochs.bad_channels or invalid_fraction > max_baseline_invalid_fraction or valid_trials.sum() < 2
         values = _beta_progress_channel_features(
             epochs,
             channel_index,
             max_lag_percent=max_lag_percent,
+            smoothing_sigma_seconds=smoothing_sigma_seconds,
+            slope_method=slope_method,
+            processed_curves=processed_curves,
         )
         row: dict[str, Any] = {
             "channel": channel_name,
             "is_bad": is_bad,
+            "baseline_invalid_fraction": invalid_fraction,
+            "valid_trial_count": int(valid_trials.sum()),
             **{f"beta_progress__{key}": value for key, value in values.items()},
         }
         if is_bad and mask_bad_features:
             for key in tuple(row):
-                if key not in {"channel", "is_bad"}:
+                if key.startswith("beta_progress__"):
                     row[key] = np.nan
         rows.append(row)
     return pd.DataFrame(rows)
@@ -1010,7 +1119,7 @@ def _band_channel_features(
     max_audio_lag: float,
 ) -> dict[str, float]:
     onset_trials = np.asarray(epochs.onset[band][:, channel_index], dtype=float)
-    mean_curve = np.nanmean(onset_trials, axis=0)
+    mean_curve = finite_mean(onset_trials)
     times = epochs.onset_times
     pre = _window_mask(times, -0.5, 0.0)
     early = _window_mask(times, 0.0, 0.5)
@@ -1070,7 +1179,7 @@ def _band_channel_features(
         features["offset_rebound"] = np.nan
         features["offset_slope"] = np.nan
     else:
-        offset_curve = np.nanmean(epochs.offset[band][:, channel_index], axis=0)
+        offset_curve = finite_mean(epochs.offset[band][:, channel_index])
         offset_times = epochs.offset_times
         before = _window_mask(offset_times, -0.2, 0.0)
         after = _window_mask(offset_times, 0.0, 0.5)
@@ -1111,6 +1220,9 @@ def extract_electrode_features(
     rows: list[dict[str, Any]] = []
     for channel_index, channel_name in enumerate(epochs.channel_names):
         is_bad = channel_name in epochs.bad_channels
+        for band_data in epochs.onset.values():
+            valid_trials = np.isfinite(band_data[:, channel_index]).all(axis=-1)
+            is_bad |= valid_trials.sum() < 2 or valid_trials.mean() < 0.75
         row: dict[str, Any] = {"channel": channel_name, "is_bad": is_bad}
         for band in epochs.onset:
             values = _band_channel_features(
@@ -1163,6 +1275,10 @@ def build_beta_progress_feature_table_from_files(
     duration_mad_threshold: float = 2.5,
     min_trials_after_filter: int = 3,
     pre_post_window: float | None = None,
+    baseline_relative_floor: float = 1e-3,
+    smoothing_sigma_seconds: float = 0.06,
+    slope_method: str = "savgol",
+    max_baseline_invalid_fraction: float = 0.25,
 ) -> tuple[pd.DataFrame, BetaProgressEpochs]:
     """Convenience loader for the beta-only normalized-progress pipeline."""
 
@@ -1178,8 +1294,12 @@ def build_beta_progress_feature_table_from_files(
         duration_mad_threshold=duration_mad_threshold,
         min_trials_after_filter=min_trials_after_filter,
         pre_post_window=pre_post_window,
+        baseline_relative_floor=baseline_relative_floor,
     )
-    features = extract_beta_progress_features(epochs)
+    features = extract_beta_progress_features(
+        epochs, smoothing_sigma_seconds=smoothing_sigma_seconds, slope_method=slope_method,
+        max_baseline_invalid_fraction=max_baseline_invalid_fraction,
+    )
     return features, epochs
 
 
