@@ -419,8 +419,12 @@ def test_four_trials_use_two_per_disjoint_half(evaluator, epochs):
 
 
 def test_all_candidates_with_singletons_cannot_produce_a_recommendation(evaluator, epochs):
-    with pytest.raises(ValueError, match="No eligible"):
+    with pytest.raises(ValueError, match="No eligible") as caught:
         evaluate(evaluator, epochs, k_values=(11,), n_resamples=1)
+    assert not caught.value.summary.eligible.any()
+    assert caught.value.summary.has_tiny_cluster.all()
+    assert len(caught.value.resamples) == 1
+    assert caught.value.clean_mask.sum() == 12
 
 
 def test_collapsed_clusters_are_invalid_replicates(evaluator, epochs):

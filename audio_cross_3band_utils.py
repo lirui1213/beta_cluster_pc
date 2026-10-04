@@ -18,6 +18,7 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.io import wavfile
 from scipy.signal import butter, peak_widths, sosfiltfilt
 
+from baseline_sources import load_file_baseline_statistics
 from signal_processing import (
     baseline_statistics,
     curve_slope,
@@ -81,8 +82,8 @@ class BetaProgressEpochs:
     speech onset to speech offset as 0-100 percent progress. ``pre`` and
     ``post`` use fixed real-time windows whose size is derived from the minimum
     positive interval between each trial's offset and the next trial's onset.
-    All ECoG arrays are baseline-Z scored per trial and channel using the
-    complete pre-onset window.
+    ECoG arrays use either a shared patient-level file reference or a separate
+    per-trial pre-onset baseline. Display windows do not define the baseline.
     """
 
     speech: FloatArray
@@ -102,6 +103,10 @@ class BetaProgressEpochs:
     beta_band: tuple[float, float]
     pre_post_window: float
     baseline_diagnostics: pd.DataFrame | None = None
+    baseline_mode: str = "pre_onset"
+    baseline_window: tuple[float, float] | None = None
+    baseline_reference: pd.DataFrame | None = None
+    baseline_segments: pd.DataFrame | None = None
 
 
 def _baseline_quality_table(events, channels, mean, std, floor, invalid, *, band="beta"):
@@ -113,7 +118,7 @@ def _baseline_quality_table(events, channels, mean, std, floor, invalid, *, band
         "baseline_mean": mean.ravel(),
         "baseline_std": std.ravel(),
         "denominator_floor": floor.ravel(),
-        "is_low_variance": invalid.ravel(),
+        "is_low_variance": (np.isfinite(std) & (std <= floor)).ravel(),
         "valid": (~invalid).ravel(),
     })
 
@@ -648,6 +653,11 @@ def extract_beta_progress_epochs(
     picks: Any = "data",
     epsilon: float | None = None,
     baseline_relative_floor: float = 1e-3,
+    baseline_mode: str = "pre_onset",
+    baseline_window: tuple[float, float] = (-1.3, -0.3),
+    baseline_fif: str | Path | None = None,
+    baseline_segments_csv: str | Path | None = None,
+    baseline_edge_seconds: float = 0.3,
     filter_kwargs: Mapping[str, Any] | None = None,
 ) -> BetaProgressEpochs:
     """Extract beta power on a normalized speech-progress time base.
@@ -662,6 +672,14 @@ def extract_beta_progress_epochs(
         raise ValueError("progress_points must be at least three.")
     if epsilon is not None and (not np.isfinite(epsilon) or epsilon <= 0):
         raise ValueError("epsilon must be positive or None.")
+    if baseline_mode not in {"file", "pre_onset"}:
+        raise ValueError("baseline_mode must be 'file' or 'pre_onset'.")
+    if baseline_mode == "file" and baseline_fif is None:
+        raise ValueError("baseline_fif is required for baseline_mode='file'.")
+    if baseline_mode == "pre_onset":
+        bounds = np.asarray(baseline_window, dtype=float)
+        if bounds.shape != (2,) or not np.isfinite(bounds).all() or not bounds[0] < bounds[1] < 0:
+            raise ValueError("baseline_window must contain two finite times with start < stop < 0.")
     required_columns = {"onset", "offset", "duration"}
     if not required_columns.issubset(events.columns):
         raise ValueError(f"Events must contain columns {sorted(required_columns)}.")
@@ -730,9 +748,56 @@ def extract_beta_progress_epochs(
     speech_unscaled = _sample_trial_progress(power, sample_times, onset, offset, progress_fraction)
     post_unscaled = _sample_continuous(power, sample_times, offset, post_times)
 
-    baseline_mean, baseline_std, floor, invalid = baseline_statistics(
-        pre_unscaled, relative_floor=baseline_relative_floor, absolute_floor=epsilon,
-    )
+    file_reference = None
+    baseline_segments = None
+    if baseline_mode == "file":
+        file_reference = load_file_baseline_statistics(
+            baseline_fif, channel_names, beta_band=(beta_low, beta_high),
+            segments_csv=baseline_segments_csv, edge_seconds=baseline_edge_seconds,
+            relative_floor=baseline_relative_floor, absolute_floor=epsilon,
+            task_info=picked.info, filter_kwargs=kwargs,
+        )
+        shape = (len(valid_events), len(channel_names))
+        baseline_mean, baseline_std, floor, invalid = [
+            np.broadcast_to(value, shape).copy()
+            for value in (file_reference.mean, file_reference.std, file_reference.floor, file_reference.invalid)
+        ]
+        baseline_reference = file_reference.reference
+        baseline_segments = file_reference.segments
+        reasons = np.tile(baseline_reference.invalid_reason.to_numpy(), len(valid_events))
+    else:
+        base_times = np.linspace(bounds[0], bounds[1], int(round((bounds[1] - bounds[0]) * sfreq)) + 1)
+        if len(base_times) < 2:
+            raise ValueError("baseline_window must contain at least two samples.")
+        baseline = np.full((len(valid_events), len(channel_names), len(base_times)), np.nan)
+        trial_reasons = np.full(len(valid_events), "", dtype=object)
+        for i, start in enumerate(onset):
+            left, right = start + bounds
+            other = ordered.original_trial_id != valid_events.original_trial_id.iloc[i]
+            if left < recording_start or right > recording_stop:
+                trial_reasons[i] = "outside_recording"
+            elif ((ordered.onset <= right) & (ordered.offset >= left) & other).any():
+                trial_reasons[i] = "overlaps_speech"
+            else:
+                baseline[i] = _sample_continuous(power, sample_times, np.array([start]), base_times)[0]
+        baseline_mean, baseline_std, floor, invalid = baseline_statistics(
+            baseline, relative_floor=baseline_relative_floor, absolute_floor=epsilon,
+        )
+        normalized = normalize_power(baseline, baseline_mean, baseline_std, invalid)
+        baseline_reference = _baseline_quality_table(valid_events, channel_names, baseline_mean, baseline_std, floor, invalid)
+        baseline_reference["baseline_samples"] = np.where(invalid.ravel(), 0, len(base_times))
+        baseline_reference["baseline_seconds"] = bounds[1] - bounds[0]
+        baseline_reference["normalized_mean"] = finite_mean(normalized, axis=-1).ravel()
+        baseline_reference["normalized_std"] = np.std(normalized, axis=-1).ravel()
+        reasons = np.repeat(trial_reasons, len(channel_names))
+        reasons = np.where((reasons == "") & invalid.ravel(), "low_variance_or_nonfinite", reasons)
+        baseline_reference["invalid_reason"] = reasons
+        baseline_reference["baseline_mode"] = baseline_mode
+    quality = _baseline_quality_table(valid_events, channel_names, baseline_mean, baseline_std, floor, invalid)
+    quality["baseline_mode"] = baseline_mode
+    quality["baseline_start_seconds"] = baseline_window[0] if baseline_mode == "pre_onset" else np.nan
+    quality["baseline_stop_seconds"] = baseline_window[1] if baseline_mode == "pre_onset" else np.nan
+    quality["invalid_reason"] = reasons
     pre = normalize_power(pre_unscaled, baseline_mean, baseline_std, invalid)
     speech = normalize_power(speech_unscaled, baseline_mean, baseline_std, invalid)
     post = normalize_power(post_unscaled, baseline_mean, baseline_std, invalid)
@@ -758,7 +823,11 @@ def extract_beta_progress_epochs(
         sfreq=sfreq,
         beta_band=(beta_low, beta_high),
         pre_post_window=window,
-        baseline_diagnostics=_baseline_quality_table(valid_events, channel_names, baseline_mean, baseline_std, floor, invalid),
+        baseline_diagnostics=quality,
+        baseline_mode=baseline_mode,
+        baseline_window=tuple(map(float, bounds)) if baseline_mode == "pre_onset" else None,
+        baseline_reference=baseline_reference,
+        baseline_segments=baseline_segments,
     )
 
 
@@ -1276,6 +1345,11 @@ def build_beta_progress_feature_table_from_files(
     min_trials_after_filter: int = 3,
     pre_post_window: float | None = None,
     baseline_relative_floor: float = 1e-3,
+    baseline_mode: str = "pre_onset",
+    baseline_window: tuple[float, float] = (-1.3, -0.3),
+    baseline_fif: str | Path | None = None,
+    baseline_segments_csv: str | Path | None = None,
+    baseline_edge_seconds: float = 0.3,
     smoothing_sigma_seconds: float = 0.06,
     slope_method: str = "savgol",
     max_baseline_invalid_fraction: float = 0.25,
@@ -1295,6 +1369,11 @@ def build_beta_progress_feature_table_from_files(
         min_trials_after_filter=min_trials_after_filter,
         pre_post_window=pre_post_window,
         baseline_relative_floor=baseline_relative_floor,
+        baseline_mode=baseline_mode,
+        baseline_window=baseline_window,
+        baseline_fif=baseline_fif,
+        baseline_segments_csv=baseline_segments_csv,
+        baseline_edge_seconds=baseline_edge_seconds,
     )
     features = extract_beta_progress_features(
         epochs, smoothing_sigma_seconds=smoothing_sigma_seconds, slope_method=slope_method,

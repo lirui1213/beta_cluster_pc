@@ -65,7 +65,7 @@ def curve_epochs(curves=None):
 def test_baseline_zscore_is_invariant_to_voltage_units():
     small, large = raw_epochs(), raw_epochs(scale=1e6)
     np.testing.assert_allclose(small.pre, large.pre, atol=1e-8)
-    np.testing.assert_allclose(np.std(small.pre, axis=-1), 1.0, atol=1e-8)
+    np.testing.assert_allclose(small.baseline_reference.normalized_std, 1.0, atol=1e-8)
 
 
 def test_flat_baseline_is_flagged_and_not_imputed_as_a_response():

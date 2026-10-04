@@ -31,6 +31,19 @@ class ClusterStabilityEvaluation:
     clean_mask: NDArray[np.bool_]
 
 
+class NoEligibleClusterError(ValueError):
+    """No recommendation, with diagnostics retained for inspection/export."""
+
+    def __init__(self, summary, resamples, clean_mask):
+        super().__init__(
+            "No eligible K: full-data clusters are collapsed/tiny or fewer than "
+            "80% supported complete stability replicates remain for either resampling type."
+        )
+        self.summary = summary
+        self.resamples = resamples
+        self.clean_mask = clean_mask.copy()
+
+
 _METADATA = frozenset({
     "channel", "is_bad", "label", "pc1", "pc2", "pc3", "original_trial_id",
     "baseline_invalid_fraction", "valid_trial_count", "baseline_mean", "baseline_std",
@@ -405,10 +418,7 @@ def evaluate_beta_cluster_stability(
     summary["selection_rank"] = np.nan
     eligible = summary.loc[summary.eligible]
     if eligible.empty:
-        raise ValueError(
-            "No eligible K: full-data clusters are collapsed/tiny or fewer than "
-            "80% supported complete stability replicates remain for either resampling type."
-        )
+        raise NoEligibleClusterError(summary, resamples, clean_mask)
     metrics = ["silhouette", "split_half_ari_mean", "bootstrap_ari_mean"]
     scores = eligible[metrics].rank(ascending=False, method="average").mean(axis=1)
     summary.loc[scores.index, "selection_score"] = scores
@@ -422,4 +432,4 @@ def evaluate_beta_cluster_stability(
     return ClusterStabilityEvaluation(summary, resamples, int(ranked.iloc[0].k), (~excluded).copy())
 
 
-__all__ = ["ClusterStabilityEvaluation", "evaluate_beta_cluster_stability"]
+__all__ = ["ClusterStabilityEvaluation", "NoEligibleClusterError", "evaluate_beta_cluster_stability"]

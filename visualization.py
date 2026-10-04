@@ -352,27 +352,11 @@ def plot_two_nonoverlapping_beta_trials(
 ) -> tuple[Figure, NDArray[Any]]:
     """Plot two non-overlapping trials on one percent-progress figure."""
 
-    if trial_indices is None:
-        first, second = _default_nonoverlapping_trials(epochs.events)
-    else:
-        if len(trial_indices) != 2:
-            raise ValueError("trial_indices must contain exactly two trial indices.")
-        first, second = (int(trial_indices[0]), int(trial_indices[1]))
-    if not (0 <= first < len(epochs.events) and 0 <= second < len(epochs.events)):
-        raise IndexError("trial index out of range.")
-    first_row = epochs.events.iloc[first]
-    second_row = epochs.events.iloc[second]
-    if not (
-        float(first_row["offset"]) <= float(second_row["onset"])
-        or float(second_row["offset"]) <= float(first_row["onset"])
-    ):
-        raise ValueError("Selected trials overlap in absolute time.")
-
     if channel_name is None:
         good = np.asarray([name not in epochs.bad_channels for name in epochs.channel_names], dtype=bool)
         if not np.any(good):
             good = np.ones(len(epochs.channel_names), dtype=bool)
-        beta = np.nanmean(epochs.speech[:, good, :], axis=1)
+        beta = finite_mean(epochs.speech[:, good, :], axis=1)
         beta_label = "Mean good electrodes"
     else:
         if channel_name not in epochs.channel_names:
@@ -380,6 +364,29 @@ def plot_two_nonoverlapping_beta_trials(
         channel_index = epochs.channel_names.index(channel_name)
         beta = epochs.speech[:, channel_index, :]
         beta_label = channel_name
+
+    valid_trials = np.isfinite(beta).all(axis=-1) & np.isfinite(epochs.audio_speech).all(axis=-1)
+    if trial_indices is None:
+        available = np.flatnonzero(valid_trials)
+        if len(available) < 2:
+            raise ValueError("Need two trials with valid beta and audio for the preview.")
+        left, right = _default_nonoverlapping_trials(epochs.events.iloc[available])
+        first, second = int(available[left]), int(available[right])
+    else:
+        if len(trial_indices) != 2:
+            raise ValueError("trial_indices must contain exactly two trial indices.")
+        first, second = (int(trial_indices[0]), int(trial_indices[1]))
+    if not (0 <= first < len(epochs.events) and 0 <= second < len(epochs.events)):
+        raise IndexError("trial index out of range.")
+    if not valid_trials[[first, second]].all():
+        raise ValueError("Selected trials must have valid beta and audio for the preview.")
+    first_row = epochs.events.iloc[first]
+    second_row = epochs.events.iloc[second]
+    if not (
+        float(first_row["offset"]) <= float(second_row["onset"])
+        or float(second_row["offset"]) <= float(first_row["onset"])
+    ):
+        raise ValueError("Selected trials overlap in absolute time.")
 
     if figure is None:
         figure, axes = plt.subplots(2, 1, figsize=(10, 5.8), sharex=True, constrained_layout=True)

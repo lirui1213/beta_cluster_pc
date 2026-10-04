@@ -146,11 +146,34 @@ review = BadChannelReviewWindow(result.first_round).show()
 
 ### 2026-10-03 分析优化
 
-优化前源码已保存到 GitHub 分支 `2026/10/03`，提交 `3b8d161`。优化在本地分支 `codex/beta-optimization-2026-10-03` 中继续，保留远端快照。
+优化前源码已保存到 GitHub 分支 `2026/10/03`，提交 `3b8d161`。优化已合并到本地 `2026/10/03`，尚未推送，远端保留优化前快照。
 
 基线分母改为真实的基线功率标准差，不再默认加 `1e-6`。质量下限由每个电极的典型基线标准差乘 `BASELINE_RELATIVE_FLOOR`（默认 `1e-3`）决定，同时使用相对于基线功率的数值精度下限。低方差或非有限基线会使该 trial/channel 的数据成为 NaN，并保存到 `baseline_quality.csv`。无效 trial 比例超过 `MAX_BASELINE_INVALID_FRACTION`（默认 0.25），或不足两个有效 trial 的电极不参与聚类。`baseline_invalid_fraction` 和 `valid_trial_count` 仅用于质量检查，不参与聚类。修正后 Z 值的数值尺度会改变，应从初始化 cell 开始重新运行，不能沿用旧的特征文件或标签。
 
 分类用的平滑参数 `FEATURE_SMOOTH_SIGMA_SECONDS` 默认 0.06 秒，按每个 trial 的实际时长换算；先平滑 beta 功率和音频包络，再用 `FEATURE_SLOPE_METHOD="savgol"` 估计导数。导数仍以说话进程百分比为单位。语音段降采样采用多相抗混叠滤波。
+
+### 可选基线来源
+
+Notebook 参数区可切换两种模式；两者均使用 `Z=(power-baseline_mean)/baseline_std`，计算对象为未做分析平滑的 beta Hilbert 包络平方。基线窗口与 `PRE_POST_WINDOW_SECONDS` 显示窗口独立。原三频带接口不变；beta 文件加载接口默认 `pre_onset`，Notebook 默认 `file`。
+
+```python
+BASELINE_MODE = "file"  # Or "pre_onset"
+BASELINE_FIF = ECOG_DATA_ROOT / SUBJECT_ID / "baseline" / "baseline.fif"
+BASELINE_SEGMENTS_CSV = None
+BASELINE_WINDOW_SECONDS = (-1.3, -0.3)
+BASELINE_EDGE_SECONDS = 0.3
+```
+
+- `file`：自动读取同目录的 `baseline__segments.csv`；没有 CSV 时优先使用 FIF 中的 `quiet...` annotations，否则将连续记录作为一个片段。BAD annotations 会被排除，拼接边界不跨段滤波。每段分别执行与任务相同的带通和 Hilbert 功率处理，两端裁去半个 FIR 核长度加 `BASELINE_EDGE_SECONDS`；IIR 使用显式 edge margin。过短段跳过，至少需要合计 1 秒有效参考数据。按有效采样点汇总每个电极的均值和标准差，不平均片段标准差。所有 trial 共用此电极的统计量。裁边减少但不能保证彻底消除 Hilbert/IIR 边缘影响；1 秒是最低技术限制，不是可靠性证明。
+- `pre_onset`：逐 trial、逐电极使用 `BASELINE_WINDOW_SECONDS`，默认 onset 前 `[-1.3,-0.3]` 秒，窗口必须完全位于 onset 前。越界或与任意其他已标记语音段重叠（包括被 duration 过滤排除的 trial）时，整组 trial/channel 无效，原因记录为 `outside_recording` 或 `overlaps_speech`；不会截短窗口或自动改用文件基线。此模式可适应局部漂移，但短窗口的方差估计更易波动。0.3 秒隔离不保证完全避免零相位滤波的事件泄漏，也不保证没有上一 trial 的残留反应。
+
+文件模式按通道名排序，缺少任务电极、采样率、保存的 highpass/lowpass 设置、通道类型/单位或 reference flag 不匹配时明确报错。相同元数据 **不证明**参考电极集合、notch 滤波或全部处理历史完全相同，必须确认截取文件与任务文件采用相同参考及预处理。参考文件标为 bad 的电极无效。文件模式只有一组汇总统计，relative floor 与该通道自身汇总 std 比较，主要识别数值退化，不能替代片段伪迹检查。
+
+`baseline_quality.csv` 记录每个 trial/channel 的来源、基线统计量和无效原因；`baseline_reference.csv` 记录实际参考的均值/标准差及归一化数值校验；`baseline_segments_report.csv` 记录文件片段裁边、有效时长及跳过原因（仅 file 模式生成）。改来源后从初始化 Cell 开始重跑，不沿用旧标签。任务显示 pre 段的均值不一定是 0、标准差不一定是 1，因为它不再等同于归一化参考。
+
+两模式的参考检查可运行 `python scripts/verify_beta_optimization.py --mode inprocess --baseline-mode file --baseline-only`，再切换 `--baseline-mode pre_onset`。去掉 `--baseline-only` 执行完整聚类流程；稳定性资格仍按原规则检查，不因更换基线而放宽。
+
+没有合格 K 时仍导出 `cluster_stability_summary.csv` 和 `cluster_stability_resamples.csv`，显示检查结果后停止，不悄悄采用手动 K。仅需查看人工 K 曲线时，明确设置 `RUN_CLUSTER_STABILITY=False` 和 `AUTO_SELECT_K=False`；验证脚本对应选项为 `--skip-stability`，结果单独放入 `manual_k` 子目录，不应把这些曲线解释为通过了稳定性检查。示例 trial 图只自动选择 beta/audio 有效的非重叠 trial。
 
 新增早/中/晚响应、正负响应面积、正负峰及位置、主峰半突出度宽度、offset 回落/反弹等形态特征。特征筛选只使用好电极，优先保留可解释的形态和相关性特征，剔除常量、缺失过多及绝对相关性达到 `FEATURE_CORRELATION_THRESHOLD`（默认 0.95）的重复特征。`NORMALIZE_FEATURE_GROUP_WEIGHTS=True` 时，权重表示各特征组的总预算，避免同一组仅因列数更多而占据更大的距离权重。第二轮在坏道复审后重新进行特征筛选。
 

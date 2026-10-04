@@ -12,11 +12,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--kernel", default="ecog_lr_v1")
     parser.add_argument("--mode", choices=("inprocess", "kernel"), default="inprocess")
+    parser.add_argument("--baseline-mode", choices=("file", "pre_onset"))
+    parser.add_argument("--baseline-only", action="store_true")
+    parser.add_argument("--skip-stability", action="store_true", help="Explicit manual-K plotting verification only")
     args = parser.parse_args()
     project = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(project))
     notebook = json.loads((project / "ECoG_3band_clustering_pipeline.ipynb").read_text(encoding="utf-8"))
     output = project / "outputs" / "optimization_verification"
+    if args.baseline_mode is not None:
+        output = output / args.baseline_mode
+    if args.skip_stability:
+        output = output / "manual_k"
     output.mkdir(parents=True, exist_ok=True)
     for cell in notebook["cells"]:
         if cell["cell_type"] == "code":
@@ -29,41 +36,58 @@ def main():
             if args.mode == "inprocess":
                 cell["source"] = cell["source"].replace("%matplotlib inline", "import matplotlib\nmatplotlib.use('Agg')")
             if "SUBJECT_ID =" in cell["source"]:
+                if args.skip_stability:
+                    cell["source"] += "\nRUN_CLUSTER_STABILITY = False\nAUTO_SELECT_K = False\n"
+                if args.baseline_mode is not None:
+                    cell["source"] += f"\nBASELINE_MODE = {args.baseline_mode!r}\n"
                 cell["source"] += f"\nOUTPUT_DIR = Path({str(output)!r}) / SUBJECT_ID / BLOCK_ID\nOUTPUT_DIR.mkdir(parents=True, exist_ok=True)\n"
+    if args.baseline_only:
+        notebook["cells"] = notebook["cells"][:9]
     notebook["cells"].append({"cell_type": "code", "id": "verification", "metadata": {}, "execution_count": None, "outputs": [], "source": """
 import json
 from visualization import _concat_beta_progress_display
-valid_baselines = baseline_quality['valid'].to_numpy().reshape(beta_epochs.pre.shape[:2])
-means = np.mean(beta_epochs.pre, axis=-1)[valid_baselines]
-stds = np.std(beta_epochs.pre, axis=-1)[valid_baselines]
+reference = beta_epochs.baseline_reference
+means = reference.loc[reference.valid, 'normalized_mean'].to_numpy()
+stds = reference.loc[reference.valid, 'normalized_std'].to_numpy()
+assert len(means) > 0, 'No valid baseline references'
 assert np.max(np.abs(means)) < 1e-8
 assert np.allclose(stds, 1.0, atol=1e-8)
-axis, _, _, _ = _concat_beta_progress_display(beta_epochs, display_sfreq=DISPLAY_SFREQ)
+axis, _, _, _ = _concat_beta_progress_display(beta_epochs, display_sfreq=globals().get('DISPLAY_SFREQ', 100.0))
 assert np.allclose(np.diff(axis), np.diff(axis)[0], atol=1e-12)
-assert np.all(second_result.labels[combined_bad_mask] == -1)
-assert {'baseline_invalid_fraction', 'valid_trial_count'}.isdisjoint(second_result.feature_columns)
-if stability is not None:
-    assert np.array_equal(stability.clean_mask, second_result.clean_mask)
-    assert selected_second_k == stability.recommended_k if AUTO_SELECT_K else True
+if 'second_result' in globals():
+    assert np.all(second_result.labels[combined_bad_mask] == -1)
+    assert {'baseline_invalid_fraction', 'valid_trial_count'}.isdisjoint(second_result.feature_columns)
+    if stability is not None:
+        assert np.array_equal(stability.clean_mask, second_result.clean_mask)
+        assert selected_second_k == stability.recommended_k if AUTO_SELECT_K else True
 metrics = {
     'subject': SUBJECT_ID, 'block': BLOCK_ID, 'trials': len(beta_epochs.events),
     'channels': len(beta_epochs.channel_names),
-    'bad_channels': int(combined_bad_mask.sum()),
+    'baseline_mode': beta_epochs.baseline_mode,
+    'stability_enabled': RUN_CLUSTER_STABILITY,
+    'baseline_window': beta_epochs.baseline_window,
+    'bad_channels': int(features['is_bad'].sum()),
     'invalid_baselines': int((~baseline_quality['valid']).sum()),
     'baseline_mean_max_abs': float(np.max(np.abs(means))),
     'baseline_std_min': float(stds.min()), 'baseline_std_max': float(stds.max()),
     'display_step_seconds': float(np.diff(axis)[0]),
-    'selected_features': len(second_result.feature_columns),
-    'selected_k': int(selected_second_k),
-    'cluster_sizes': {str(int(k)): int(v) for k, v in second_assignments.label.value_counts().items()},
 }
+if beta_epochs.baseline_segments is not None:
+    metrics['usable_reference_seconds'] = float(beta_epochs.baseline_segments.usable_seconds.sum())
+    metrics['used_segments'] = int(beta_epochs.baseline_segments.used.sum())
+if 'second_result' in globals():
+    metrics.update(
+        selected_features=len(second_result.feature_columns), selected_k=int(selected_second_k),
+        cluster_sizes={str(int(k)): int(v) for k, v in second_assignments.label.value_counts().items()},
+    )
 (OUTPUT_DIR / 'verification_metrics.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
-fig_ci, _ = plot_beta_cluster_grid(
-    beta_epochs, second_result.labels, sigma_seconds=BETA_CURVE_SMOOTH_SIGMA_SECONDS,
-    display_sfreq=DISPLAY_SFREQ, uncertainty='trial_bootstrap',
-    bootstrap_iterations=CURVE_BOOTSTRAP_ITERATIONS, random_state=RANDOM_STATE,
-)
-fig_ci.savefig(OUTPUT_DIR / 'beta_trial_bootstrap_ci.png', dpi=200, bbox_inches='tight')
+if 'second_result' in globals():
+    fig_ci, _ = plot_beta_cluster_grid(
+        beta_epochs, second_result.labels, sigma_seconds=BETA_CURVE_SMOOTH_SIGMA_SECONDS,
+        display_sfreq=DISPLAY_SFREQ, uncertainty='trial_bootstrap',
+        bootstrap_iterations=CURVE_BOOTSTRAP_ITERATIONS, random_state=RANDOM_STATE,
+    )
+    fig_ci.savefig(OUTPUT_DIR / 'beta_trial_bootstrap_ci.png', dpi=200, bbox_inches='tight')
 print(json.dumps(metrics, indent=2))
 """})
     try:
