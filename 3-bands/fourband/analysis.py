@@ -41,6 +41,8 @@ class FourBandExtraction:
     epochs: dict
     bands: dict
     filter_kwargs: dict | None = None
+    feature_settings: dict | None = None
+    trial_exclusions: tuple = ()
 
 
 def _validate_bands(bands, sfreq):
@@ -105,7 +107,9 @@ def extract_fourband(raw, events, audio, *, bands=None, smoothing_sigma_seconds=
     feature_table = pd.DataFrame(feature_table)
     feature_table["exclusion_reason"] = [";".join(parts) for parts in reasons]
     return FourBandExtraction(feature_table, epochs_by_band, bands,
-        filter_kwargs=dict(epoch_kwargs.get("filter_kwargs") or {}))
+        filter_kwargs=dict(epoch_kwargs.get("filter_kwargs") or {}),
+        feature_settings=dict(smoothing_sigma_seconds=smoothing_sigma_seconds,
+            slope_method=slope_method, max_baseline_invalid_fraction=max_baseline_invalid_fraction))
 
 
 def load_fourband(fif_path, onset_path, offset_path, wav_path, *, picks="ecog", **kwargs):
@@ -120,12 +124,15 @@ def load_fourband(fif_path, onset_path, offset_path, wav_path, *, picks="ecog", 
 
 
 def fit_joint(features, *, n_clusters=4, bands=None, band_weights=None,
-              bad_mask=None, correlation_threshold=.95, random_state=50):
+              bad_mask=None, correlation_threshold=.95, random_state=50,
+              weight_preset="legacy", group_weights=None):
     """Prune ECoG-only predictors within bands and assign fixed band distance budgets.
 
     Audio diagnostics may remain in the input, including legacy feature tables,
     but are excluded before redundancy selection or any estimator is fitted.
     """
+    from .weights import feature_group, resolve_group_budgets, group_feature_weights
+    group_budgets = resolve_group_budgets(weight_preset, group_weights)
     bands = tuple(DEFAULT_BANDS if bands is None else bands)
     if len(bands) != 4 or len(set(bands)) != 4:
         raise ValueError("Four unique bands are required for joint fitting.")
@@ -145,6 +152,8 @@ def fit_joint(features, *, n_clusters=4, bands=None, band_weights=None,
         prefix = band + "__"
         columns = [c for c in features if c.startswith(prefix)
                    and c.removeprefix(prefix) in ECOG_FEATURE_SUFFIXES]
+        if group_budgets is not None:
+            columns = [c for c in columns if group_budgets[feature_group(c)] > 0]
         if not columns:
             raise ValueError(f"No ECoG predictors for {band}; cannot fit a four-band model.")
         table = features[["channel", "is_bad", *columns]].copy()
@@ -155,10 +164,13 @@ def fit_joint(features, *, n_clusters=4, bands=None, band_weights=None,
             raise ValueError(f"No usable predictors for {band}: {error}") from error
         if not keep:
             raise ValueError(f"No nonconstant predictors for {band} among included electrodes.")
-        canonical = [c.replace("power_slope", "beta_slope") for c in keep]
-        local = default_beta_progress_feature_weights(canonical, normalize_groups=True)
-        total = sum(local.values())
-        weights.update({c: float(budgets[band] * local[k] / total) for c, k in zip(keep, canonical, strict=True)})
+        if group_budgets is None:
+            canonical = [c.replace("power_slope", "beta_slope") for c in keep]
+            local = default_beta_progress_feature_weights(canonical, normalize_groups=True)
+            total = sum(local.values())
+            weights.update({c: float(budgets[band] * local[k] / total) for c, k in zip(keep, canonical, strict=True)})
+        else:
+            weights.update(group_feature_weights(keep, group_budgets, budgets[band]))
         selected.extend(keep)
     return cluster_electrodes(features, n_clusters=n_clusters, bad_mask=bad_mask,
         feature_columns=selected, feature_weights=weights, random_state=random_state)

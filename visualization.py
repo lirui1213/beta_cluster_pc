@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import warnings
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
@@ -855,14 +857,162 @@ def _load_tumor_mesh(
     return _triangular_polydata(tkras_vertices, triangles)
 
 
+def _on_plotter_close(plotter, cleanup):
+    """Run owned resource cleanup on both direct close and native GUI close."""
+    callbacks = getattr(plotter, "_surface_close_callbacks", None)
+    if callbacks is None:
+        callbacks = []
+        plotter._surface_close_callbacks = callbacks
+        original_close = plotter.close
+        interactor = getattr(getattr(plotter, "iren", None), "interactor", None)
+        exit_observer = None
+
+        def cleanup_all():
+            nonlocal exit_observer
+            if exit_observer is not None:
+                interactor.RemoveObserver(exit_observer)
+                exit_observer = None
+            pending = callbacks[:]
+            callbacks.clear()
+            for callback in pending:
+                try:
+                    callback()
+                except Exception as exc:
+                    warnings.warn(f"Surface callback cleanup failed: {exc}")
+
+        def window_exit(caller, event):
+            cleanup_all()
+            # Observing ExitEvent replaces VTK's default termination handler.
+            caller.TerminateApp()
+
+        if interactor is not None:
+            exit_observer = interactor.AddObserver("ExitEvent", window_exit)
+
+        def close(*args, **kwargs):
+            cleanup_all()
+            return original_close(*args, **kwargs)
+
+        plotter.close = close
+    callbacks.append(cleanup)
+
+
+class _SurfaceWindowTick:
+    def __init__(self, plotter, callback):
+        if not callable(callback):
+            raise TypeError("on_window_tick must be callable or None.")
+        self.callback = callback
+        self.busy = False
+        self.last_tick = float("-inf")
+        self.iren = None
+        self.observer = self.timer = None
+        try:
+            self.iren = plotter.iren
+            self.iren.initialize()
+            self.observer = self.iren.add_observer("TimerEvent", self.tick)
+            self.timer = self.iren.create_timer(50, repeating=True)
+            if not self.timer:
+                raise RuntimeError("VTK did not create a repeating timer")
+            _on_plotter_close(plotter, self.disconnect)
+        except (AttributeError, RuntimeError, TypeError) as exc:
+            self.disconnect()
+            warnings.warn(f"Surface window tick is unavailable; linked window pump is disabled: {exc}")
+
+    def tick(self, caller, event):
+        if self.callback is None or self.busy:
+            return
+        # Win32 supplies timer IDs as event calldata, not GetTimerEventId().
+        # Rate-limit shared TimerEvents so other VTK timers cannot flood Tk.
+        now = monotonic()
+        if now - self.last_tick < .04:
+            return
+        self.last_tick = now
+        self.busy = True
+        try:
+            self.callback()
+        except Exception as exc:
+            self.disconnect()
+            warnings.warn(f"Surface window tick callback failed and was disconnected: {exc}")
+        finally:
+            self.busy = False
+
+    def disconnect(self):
+        self.callback = None
+        if self.timer is not None:
+            try:
+                self.iren.destroy_timer(self.timer)
+            except (AttributeError, RuntimeError):
+                pass
+            self.timer = None
+        if self.observer is not None:
+            try:
+                self.iren.remove_observer(self.observer)
+            except (AttributeError, RuntimeError):
+                pass
+            self.observer = None
+        self.iren = None
+
+
+class _SurfaceChannelPicking:
+    def __init__(self, plotter, actor_channels, callback):
+        if not callable(callback):
+            raise TypeError("on_channel_pick must be callable or None.")
+        self.plotter = weakref.ref(plotter)
+        self.callback = callback
+        self.actor_channels = actor_channels
+        # Use VTK actor identity; a sphere point ID is not an electrode row ID.
+        plotter.enable_point_picking(
+            callback=self.pick, picker="point", use_picker=True,
+            show_message=False, show_point=False, pickable_window=False,
+            clear_on_no_selection=False,
+        )
+        self.picker = plotter.iren.picker
+        self.picker.InitializePickList()
+        for actor in actor_channels:
+            self.picker.AddPickList(actor)
+        self.picker.PickFromListOn()
+        _on_plotter_close(plotter, self.disconnect)
+
+    def pick(self, point, picker):
+        plotter = self.plotter()
+        if self.callback is None or plotter is None or getattr(plotter, "_closed", False):
+            return
+        actor, point_id = picker.GetActor(), picker.GetPointId()
+        if actor not in self.actor_channels or point_id < 0 or not actor.GetVisibility():
+            return
+        channels, whole_actor = self.actor_channels[actor]
+        index = 0 if whole_actor else point_id
+        if index >= len(channels):
+            return
+        try:
+            self.callback(str(channels[index]))
+        except Exception as exc:
+            warnings.warn(f"Surface channel callback failed for {channels[index]!r}: {exc}")
+
+    def disconnect(self):
+        self.callback = None
+        self.actor_channels.clear()
+        self.picker.RemoveObservers("EndPickEvent")
+        self.picker.InitializePickList()
+        plotter = self.plotter()
+        if plotter is not None and getattr(plotter, "iren", None) is not None:
+            plotter.disable_picking()
+
+
 def show_pyvista_window(
     plotter: Any,
     *,
     pv_module: Any,
     camera_position: str = "xy",
     screenshot: str | Path | None = None,
+    interactive_update: bool = False,
+    on_window_tick: Any = None,
 ) -> Any:
-    """Open an interactive desktop PyVista window, even from a notebook."""
+    """Open a native window; optionally pump a linked UI every 50 ms.
+
+    ``on_window_tick`` runs inside VTK's event loop without a nested Tk mainloop.
+    For ``interactive_update=True``, callers must drive ``plotter.update()``.
+    The default remains a blocking desktop window.
+    """
 
     plotter.camera_position = camera_position
     plotter.reset_camera()
@@ -884,13 +1034,19 @@ def show_pyvista_window(
         except Exception:
             pass
 
+    ticking = None if on_window_tick is None else _SurfaceWindowTick(plotter, on_window_tick)
+    show_kwargs = dict(interactive=True, auto_close=False)
+    if interactive_update:
+        show_kwargs["interactive_update"] = True
     try:
-        result = plotter.show(notebook=False, interactive=True, auto_close=False)
-    except TypeError:
         try:
-            result = plotter.show(notebook=False)
+            result = plotter.show(notebook=False, **show_kwargs)
         except TypeError:
-            result = plotter.show()
+            # Current PyVista takes notebook at construction, not show().
+            result = plotter.show(**show_kwargs)
+    finally:
+        if ticking is not None and not interactive_update:
+            ticking.disconnect()
     if screenshot is not None:
         try:
             plotter.screenshot(str(screenshot), return_img=False)
@@ -1037,6 +1193,9 @@ def render_selectable_electrode_class(
     slider_text_font_size: int = 8,
     channel_label_toggle: bool = False,
     show_channel_labels: bool = False,
+    on_channel_pick: Any = None,
+    on_window_tick: Any = None,
+    interactive_update: bool = False,
     show: bool = True,
 ) -> Any:
     """Render one selectable electrode class with PyVista popup controls.
@@ -1044,6 +1203,8 @@ def render_selectable_electrode_class(
     ``channel_label_toggle`` adds a compact checkbox, initially off unless
     ``show_channel_labels`` is true. CSV channel identities follow the visible
     class without changing the camera or electrode styling.
+    Right-clicking an electrode calls ``on_channel_pick`` with its CSV channel.
+    ``on_window_tick`` can pump a linked Tk explorer during the blocking window.
     """
 
     try:
@@ -1111,7 +1272,8 @@ def render_selectable_electrode_class(
         )
 
     actors_by_label: dict[int, list[Any]] = {label: [] for label in unique_labels}
-    for coordinate, label in zip(display_coordinates, aligned_labels, strict=True):
+    actor_channels = {}
+    for coordinate, label, channel in zip(display_coordinates, aligned_labels, electrodes["channel"], strict=True):
         actor = plotter.add_mesh(
             pv.Sphere(
                 radius=electrode_radius,
@@ -1123,6 +1285,8 @@ def render_selectable_electrode_class(
             smooth_shading=True,
         )
         actors_by_label[int(label)].append(actor)
+        if on_channel_pick is not None:
+            actor_channels[actor] = ((str(channel),), True)
 
     state = {"label": int(selected_label), "color": selected_rgb}
     channel_labels = (
@@ -1204,8 +1368,15 @@ def render_selectable_electrode_class(
     plotter.set_background(background_color)
     plotter.camera_position = camera_position
     apply_selection()
+    if on_channel_pick is not None:
+        _SurfaceChannelPicking(plotter, actor_channels, on_channel_pick)
     if show:
-        show_pyvista_window(plotter, pv_module=pv, camera_position=camera_position)
+        extra = {}
+        if interactive_update:
+            extra["interactive_update"] = True
+        if on_window_tick is not None:
+            extra["on_window_tick"] = on_window_tick
+        show_pyvista_window(plotter, pv_module=pv, camera_position=camera_position, **extra)
     return plotter
 
 
@@ -1231,6 +1402,9 @@ def render_electrode_clusters(
     background_color: str = "white",
     channel_label_toggle: bool = False,
     show_channel_labels: bool = False,
+    on_channel_pick: Any = None,
+    on_window_tick: Any = None,
+    interactive_update: bool = False,
     show: bool = True,
     screenshot: str | Path | None = None,
 ) -> Any:
@@ -1243,6 +1417,8 @@ def render_electrode_clusters(
     drawing pial surfaces. Labels equal to ``-1`` are always white.
     ``channel_label_toggle`` adds an initially-off channel-name checkbox;
     ``show_channel_labels`` explicitly enables CSV channel identities at start.
+    Right-clicking an electrode calls ``on_channel_pick`` with its CSV channel.
+    ``on_window_tick`` can pump a linked Tk explorer during the blocking window.
     """
 
     try:
@@ -1306,7 +1482,7 @@ def render_electrode_clusters(
         )
     cloud = pv.PolyData(display_coordinates)
     cloud["cluster_rgb"] = rgb
-    plotter.add_points(
+    electrode_actor = plotter.add_points(
         cloud,
         scalars="cluster_rgb",
         rgb=True,
@@ -1324,14 +1500,23 @@ def render_electrode_clusters(
         )
     plotter.set_background(background_color)
     plotter.camera_position = camera_position
+    if on_channel_pick is not None:
+        _SurfaceChannelPicking(plotter,
+            {electrode_actor: (tuple(electrodes["channel"]), False)}, on_channel_pick)
     if screenshot is not None and not show:
         plotter.screenshot(str(screenshot), return_img=False)
     if show:
+        extra = {}
+        if interactive_update:
+            extra["interactive_update"] = True
+        if on_window_tick is not None:
+            extra["on_window_tick"] = on_window_tick
         show_pyvista_window(
             plotter,
             pv_module=pv,
             camera_position=camera_position,
             screenshot=screenshot,
+            **extra,
         )
     return plotter
 

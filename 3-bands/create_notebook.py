@@ -261,6 +261,8 @@ for round_name, fitted_result, round_dir in display_rounds:
 def update_review_cells(output):
     """Update the approved UI cells without replacing user analysis parameters."""
     existing = nbf.read(output, as_version=4)
+    if any("WEIGHT_PRESET =" in cell.source for cell in existing.cells):
+        return update_reliability_cells(output)
     revised = build_notebook()
     for index in (11, 12, 13, 14):
         if existing.cells[index].cell_type != revised.cells[index].cell_type:
@@ -313,6 +315,8 @@ def _preserve_display_parameters(source, revised):
 def update_continuous_cells(output):
     """Migrate display and policy cells without touching user parameters."""
     existing = nbf.read(output, as_version=4)
+    if any("WEIGHT_PRESET =" in cell.source for cell in existing.cells):
+        return update_reliability_cells(output)
     revised = build_notebook()
     _owned_cell(existing, "code", "SUBJECT_ID =", "def extraction_settings():")
     owners = {
@@ -348,14 +352,248 @@ def update_continuous_cells(output):
     nbf.write(existing, output)
 
 
+def build_reliability_notebook():
+    """Extend the legacy template without altering its analysis parameter cell."""
+    notebook = build_notebook()
+    initialization = notebook.cells[2]
+    initialization.source += '''
+from fourband.trial_qc import detect_trial_quality, apply_trial_exclusions, TrialExclusions
+from fourband.trial_review_window import TrialQualityReviewWindow
+from fourband.continuous import ContinuousPowerCache
+from fourband.explorer import FourBandExplorer
+from fourband.inspection import save_inspection
+from fourband.stability import save_stability
+from fourband.session import ensure_fit_settings, ensure_trial_review, close_explorers, run_stability
+from audio_cross_3band_utils import load_ecog_fif, extract_audio_envelope
+TRIAL_QC_READY = False
+EXPLORERS = {}
+'''
+    settings = nbf.v4.new_code_cell('''WEIGHT_PRESET = "legacy"  # legacy, balanced, morphology, amplitude, custom
+GROUP_WEIGHTS = {"morphology": 1.0, "amplitude": 1.0, "slope": 1.0}
+OPEN_TRIAL_QC_WINDOW = True
+TRIAL_QC_SETTINGS = None  # None: candidate detection defaults; see README
+RUN_STABILITY = True
+STABILITY_RESAMPLES = 30
+STABILITY_PROGRESS_WINDOW = True
+INSPECTION_BOOTSTRAP_DRAWS = 100
+OPEN_EXPLORER = True
+LINK_SURFACE_EXPLORER = True
+CACHE_MAX_MB = 512
+POWER_CACHE = ContinuousPowerCache(max_bytes=int(CACHE_MAX_MB * 1024**2))
+
+def fit_settings():
+    return dict(bands=dict(BANDS), band_weights=dict(BAND_WEIGHTS),
+        correlation_threshold=FEATURE_CORRELATION_THRESHOLD, random_state=RANDOM_STATE,
+        weight_preset=WEIGHT_PRESET, group_weights=dict(GROUP_WEIGHTS) if WEIGHT_PRESET == "custom" else None)
+
+def get_explorer(round_name, fitted_result, output_dir):
+    existing = EXPLORERS.get(round_name)
+    if existing is not None and existing.state.result is fitted_result and existing.state.extraction is extraction:
+        existing.state.cache = POWER_CACHE
+        return existing
+    if existing is not None:
+        existing.close()
+    explorer = FourBandExplorer(qc_raw, load_speech_events(ONSET_PATH, OFFSET_PATH),
+        extract_audio_envelope(WAV_PATH), extraction, fitted_result, cache=POWER_CACHE,
+        pre_seconds=globals().get("TRIAL_PRE_SECONDS", 1.0),
+        post_seconds=globals().get("TRIAL_POST_SECONDS", 1.0),
+        sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, display_sfreq=DISPLAY_SFREQ,
+        output_dir=output_dir / "explorer")
+    EXPLORERS[round_name] = explorer
+    return explorer''')
+    extraction_cell = notebook.cells[8]
+    extraction_cell.source = "TRIAL_QC_READY = False\nSECOND_ROUND_READY = False\nclose_explorers(EXPLORERS)\n" + extraction_cell.source
+    extraction_cell.source += "\nUNREVIEWED_EXTRACTION = extraction\n"
+    qc = nbf.v4.new_code_cell('''TRIAL_QC_READY = False
+SECOND_ROUND_READY = False
+close_explorers(EXPLORERS)
+ensure_extraction_config(extraction_settings(), extracted_settings)
+qc_raw = load_ecog_fif(FIF_PATH, preload=False)
+trial_quality_report = detect_trial_quality(qc_raw, UNREVIEWED_EXTRACTION, settings=TRIAL_QC_SETTINGS)
+display(trial_quality_report.loc[trial_quality_report.candidate])
+if OPEN_TRIAL_QC_WINDOW:
+    selected_trial_pairs = TrialQualityReviewWindow(qc_raw, UNREVIEWED_EXTRACTION,
+        trial_quality_report, initial_pairs=()).show()
+else:
+    selected_trial_pairs = ()  # explicit unattended verification: no artifact rejection
+if selected_trial_pairs is not None:
+    selected_trial_pairs = TrialExclusions(selected_trial_pairs, provenance=trial_quality_report.attrs["provenance"])
+    pending_reviewed = apply_trial_exclusions(UNREVIEWED_EXTRACTION, selected_trial_pairs,
+        smoothing_sigma_seconds=FEATURE_SMOOTH_SIGMA_SECONDS, slope_method=FEATURE_SLOPE_METHOD,
+        max_baseline_invalid_fraction=MAX_BASELINE_INVALID_FRACTION)
+    trial_review_dir = RUN_DIR / ("trial_review_" + timestamp())
+    trial_review_dir.mkdir()
+    trial_quality_report.to_csv(trial_review_dir / "trial_quality_report.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(selected_trial_pairs, columns=["channel", "original_trial_id"]).to_csv(
+        trial_review_dir / "confirmed_exclusions.csv", index=False, encoding="utf-8-sig")
+    pending_reviewed.features.to_csv(trial_review_dir / "reviewed_features.csv", index=False, encoding="utf-8-sig")
+    import json
+    (trial_review_dir / "review_settings.json").write_text(json.dumps(dict(
+        settings=trial_quality_report.attrs["settings"], units=trial_quality_report.attrs["units"],
+        provenance=trial_quality_report.attrs["provenance"],
+        exclusions=list(selected_trial_pairs)), indent=2), encoding="utf-8")
+    extraction, features = pending_reviewed, pending_reviewed.features
+    from copy import deepcopy
+    reviewed_trial_settings = deepcopy(TRIAL_QC_SETTINGS)
+    TRIAL_QC_READY = True
+    display(features[["channel", "is_bad", "exclusion_reason"]])
+    print("Confirmed channel-trial exclusions:", selected_trial_pairs)
+else:
+    print("Trial review cancelled. Confirm a fresh review before fitting.")''')
+    first = notebook.cells[10]
+    first.source = first.source.replace("SECOND_ROUND_READY = False\nensure_extraction_config",
+        "SECOND_ROUND_READY = False\nclose_explorers(EXPLORERS)\nif not TRIAL_QC_READY:\n    raise ValueError('Confirm trial QC before round one.')\nensure_extraction_config", 1)
+    first.source = first.source.replace("random_state=RANDOM_STATE)",
+        "random_state=RANDOM_STATE, weight_preset=WEIGHT_PRESET,\n    group_weights=GROUP_WEIGHTS if WEIGHT_PRESET == 'custom' else None)", 1)
+    first.source = first.source.replace("first_result, first_extraction, ROUND1_DIR =", "first_fit_settings = dict(fit_settings(), first_k=FIRST_N_CLUSTERS)\nfirst_result, first_extraction, ROUND1_DIR =")
+    first.source = first.source.replace("round_config=dict(round=1,", "round_config=dict(weight_preset=WEIGHT_PRESET, group_weights=GROUP_WEIGHTS if WEIGHT_PRESET == 'custom' else None, round=1,")
+    second = notebook.cells[14]
+    second.source = second.source.replace("SECOND_ROUND_READY = False", "SECOND_ROUND_READY = False\nensure_extraction_config(extraction_settings(), extracted_settings)\nclose_explorers(EXPLORERS)\nif not TRIAL_QC_READY:\n    raise ValueError('Confirm trial QC and rerun round one.')\nensure_fit_settings(fit_settings(), first_fit_settings)", 1)
+    second.source = second.source.replace("random_state=RANDOM_STATE)",
+        "random_state=RANDOM_STATE, weight_preset=WEIGHT_PRESET,\n        group_weights=GROUP_WEIGHTS if WEIGHT_PRESET == 'custom' else None)", 1)
+    second.source = second.source.replace("round_config=dict(round=2,", "round_config=dict(weight_preset=WEIGHT_PRESET, group_weights=GROUP_WEIGHTS if WEIGHT_PRESET == 'custom' else None, round=2,")
+    surface = notebook.cells[16]
+    surface.source = '''if RUN_3D_RENDER or RUN_SELECTABLE_CLUSTER_RENDER:
+    if not TRIAL_QC_READY:
+        raise ValueError("Confirm trial QC and refit before surface display.")
+    ensure_extraction_config(extraction_settings(), extracted_settings)
+    ensure_first_round(globals().get("first_extraction"), extraction)
+    ensure_fit_settings(fit_settings(), first_fit_settings)
+surface_explorer = None
+if SECOND_ROUND_READY and LINK_SURFACE_EXPLORER and (RUN_3D_RENDER or RUN_SELECTABLE_CLUSTER_RENDER):
+    surface_explorer = get_explorer("second", second_result, ROUND2_DIR)
+    surface_explorer.show(block=False)
+''' + surface.source
+    surface.source = surface.source.replace("channel_label_toggle=True", "on_channel_pick=surface_explorer.select_channel if surface_explorer is not None else None,\n        on_window_tick=surface_explorer.pump if surface_explorer is not None else None,\n        channel_label_toggle=True")
+    continuous = notebook.cells[18]
+    continuous.source = continuous.source.replace("ensure_extraction_config(extraction_settings(), extracted_settings)",
+        "if not TRIAL_QC_READY:\n    raise ValueError('Confirm trial QC and refit before display.')\nensure_fit_settings(fit_settings(), first_fit_settings)\nensure_extraction_config(extraction_settings(), extracted_settings)")
+    continuous.source = continuous.source.replace("display_sfreq=DISPLAY_SFREQ)", "display_sfreq=DISPLAY_SFREQ, cache=POWER_CACHE)", 1)
+    diagnostics = nbf.v4.new_code_cell('''ensure_extraction_config(extraction_settings(), extracted_settings)
+ensure_first_round(globals().get("first_extraction"), extraction)
+ensure_fit_settings(fit_settings(), first_fit_settings)
+if not TRIAL_QC_READY:
+    raise ValueError("Confirm trial QC and refit before diagnostics.")
+diagnostic_rounds = [("first", first_result, ROUND1_DIR)]
+if SECOND_ROUND_READY:
+    diagnostic_rounds.append(("second", second_result, ROUND2_DIR))
+diagnostic_outputs = {}
+for round_name, fitted_result, round_dir in diagnostic_rounds:
+    diagnostic_dir = round_dir / ("diagnostics_" + timestamp())
+    diagnostic_dir.mkdir()
+    save_inspection(extraction, fitted_result, diagnostic_dir,
+        sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, n_bootstrap=INSPECTION_BOOTSTRAP_DRAWS, random_state=RANDOM_STATE)
+    if RUN_STABILITY:
+        stability_report = run_stability(extraction, fitted_result, n_resamples=STABILITY_RESAMPLES,
+            random_state=RANDOM_STATE, fit_kwargs=fit_settings(),
+            feature_kwargs=extraction.feature_settings, show_progress=STABILITY_PROGRESS_WINDOW)
+        save_stability(stability_report, diagnostic_dir)
+        display(stability_report.channels)
+        print(round_name, stability_report.summary)
+    diagnostic_outputs[round_name] = diagnostic_dir
+    print(diagnostic_dir)''')
+    explorer = nbf.v4.new_code_cell('''ensure_extraction_config(extraction_settings(), extracted_settings)
+ensure_first_round(globals().get("first_extraction"), extraction)
+ensure_fit_settings(fit_settings(), first_fit_settings)
+if not TRIAL_QC_READY:
+    raise ValueError("Confirm trial QC and refit before exploration.")
+if OPEN_EXPLORER:
+    explorer_round = "second" if SECOND_ROUND_READY else "first"
+    fitted_result = second_result if SECOND_ROUND_READY else first_result
+    explorer_dir = ROUND2_DIR if SECOND_ROUND_READY else ROUND1_DIR
+    get_explorer(explorer_round, fitted_result, explorer_dir).show(block=True)''')
+    notebook.cells[9:9] = [nbf.v4.new_markdown_cell("## 4.1 Trial 质量人工复审\n\n候选伪迹默认只标记，不自动剔除。勾选通道 × 原始 trial 编号并确认后，四频带共同剔除对应响应。取消不会应用待选项；有效 trial 太少的电极仍按已有质量规则排除并报告。"), qc]
+    notebook.cells[5:5] = [nbf.v4.new_markdown_cell("## 2.1 可靠性与查看参数\n\n默认 legacy 保持原权重；可改 balanced、morphology、amplitude 或 custom。修改分类权重后重跑第一轮及第二轮。质量阈值只生成候选项，剔除仍须人工确认。"), settings]
+    notebook.cells.extend([nbf.v4.new_markdown_cell("## 10. 稳定性与同类细节\n\n按已经拟合的 K 做分半及 trial 重采样，不自动选 K，也不因支持次数少而阻止分类。细线/电极热图反映同类内部差异；trial 热图保留原编号。试次重采样置信带以固定电极和标签为条件，不代表显著性或分类可信概率。"), diagnostics,
+        nbf.v4.new_markdown_cell("## 11. 交互式曲线查看\n\n相邻配对选择、上一对/下一对、通道/类别与频带查看。连续曲线保留真实秒数及音频；分类剔除 trial 只作标记，不删除原始记录。脑表面点选电极可联动查看其四频带曲线。"), explorer])
+    for cell in notebook.cells:
+        if cell.cell_type == "code":
+            cell.source = cell.source.replace("ensure_fit_settings(fit_settings(), first_fit_settings)",
+                "ensure_fit_settings(dict(fit_settings(), first_k=FIRST_N_CLUSTERS), first_fit_settings)")
+            if "pending_first = fit_joint(" in cell.source:
+                cell.source = cell.source.replace("pending_first = fit_joint(",
+                    "ensure_trial_review(TRIAL_QC_SETTINGS, reviewed_trial_settings)\npending_first = fit_joint(")
+            if "ensure_fit_settings(dict(" in cell.source:
+                lines = []
+                for line in cell.source.splitlines():
+                    if line.lstrip().startswith("ensure_fit_settings(dict("):
+                        indent = line[:len(line) - len(line.lstrip())]
+                        lines.append(indent + "ensure_trial_review(TRIAL_QC_SETTINGS, reviewed_trial_settings)")
+                    lines.append(line)
+                cell.source = "\n".join(lines)
+    return notebook
+
+
+def _preserve_assignments(source, revised, names):
+    originals = {}
+    lines = source.splitlines()
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id in names:
+                originals[node.targets[0].id] = "\n".join(lines[node.lineno - 1:node.end_lineno])
+    lines = revised.splitlines()
+    for node in reversed(ast.parse(revised).body):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id in originals:
+                lines[node.lineno - 1:node.end_lineno] = [originals[node.targets[0].id]]
+    return "\n".join(lines)
+
+
+def update_reliability_cells(output):
+    existing, revised = nbf.read(output, as_version=4), build_reliability_notebook()
+    _owned_cell(existing, "code", "SUBJECT_ID =", "def extraction_settings():")
+    markers = [("PROJECT_DIR =", "from fourband.analysis import"),
+        ("pending_settings = extraction_settings()",), ("pending_first = fit_joint(",),
+        ("selected_review = FourBandReviewWindow(",), ("if RUN_3D_RENDER", "render_electrode_clusters("),
+        ("TRIAL_PAIR_IDS =", "load_continuous_trials(")]
+    positions = [(_owned_cell(existing, "code", *m), _owned_cell(revised, "code", *m)) for m in markers]
+    for old_index, new_index in positions:
+        source = revised.cells[new_index].source
+        if "TRIAL_PAIR_IDS =" in source:
+            source = _preserve_display_parameters(existing.cells[old_index].source, source)
+        existing.cells[old_index].source = source
+    additional = [("WEIGHT_PRESET =", "def fit_settings():"), ("selected_trial_pairs =", "TrialQualityReviewWindow("),
+        ("diagnostic_rounds =", "run_stability("), ("if OPEN_EXPLORER:", "show(block=True)")]
+    setting_names = {"WEIGHT_PRESET", "GROUP_WEIGHTS", "OPEN_TRIAL_QC_WINDOW", "TRIAL_QC_SETTINGS", "RUN_STABILITY",
+        "STABILITY_RESAMPLES", "STABILITY_PROGRESS_WINDOW", "INSPECTION_BOOTSTRAP_DRAWS", "OPEN_EXPLORER",
+        "LINK_SURFACE_EXPLORER", "CACHE_MAX_MB"}
+    for markers in additional:
+        new_index = _owned_cell(revised, "code", *markers)
+        matches = [i for i, c in enumerate(existing.cells) if c.cell_type == "code" and all(m in c.source for m in markers)]
+        if len(matches) > 1:
+            raise ValueError("Multiple reliability cells found; no file was changed.")
+        if matches:
+            old_index = matches[0]
+            source = revised.cells[new_index].source
+            if "WEIGHT_PRESET =" in source:
+                source = _preserve_assignments(existing.cells[old_index].source, source, setting_names)
+            existing.cells[old_index].source = source
+        else:
+            if "WEIGHT_PRESET =" in markers:
+                insert_at = _owned_cell(existing, "code", "def extraction_settings():") + 1
+            elif "selected_trial_pairs =" in markers:
+                insert_at = _owned_cell(existing, "code", "pending_settings = extraction_settings()") + 1
+            else:
+                insert_at = len(existing.cells)
+            existing.cells[insert_at:insert_at] = [revised.cells[new_index - 1], revised.cells[new_index]]
+    for cell in existing.cells:
+        if cell.cell_type == "code":
+            cell.outputs, cell.execution_count = [], None
+    nbf.validate(existing)
+    nbf.write(existing, output)
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--update-review", action="store_true")
     parser.add_argument("--update-continuous", action="store_true")
+    parser.add_argument("--update-reliability", action="store_true")
     args = parser.parse_args()
     output = Path(__file__).with_name("ECoG_4band_clustering_pipeline.ipynb")
-    if args.update_continuous:
+    if args.update_reliability:
+        update_reliability_cells(output)
+    elif args.update_continuous:
         update_continuous_cells(output)
     elif args.update_review:
         update_review_cells(output)

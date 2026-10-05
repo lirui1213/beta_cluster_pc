@@ -1,8 +1,12 @@
 """Continuous real-time power across two neighboring speech events."""
 from dataclasses import dataclass
+from collections import OrderedDict
+from collections.abc import Mapping
+import hashlib
 import json
 from numbers import Integral
 from pathlib import Path
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -12,6 +16,112 @@ from audio_cross_3band_utils import load_ecog_fif, load_speech_events, extract_a
 from signal_processing import finite_mean, gaussian_smooth_nan, normalize_power, resample_on_axis
 from visualization import cluster_color
 from .analysis import _validate_bands
+
+
+_HASH_CHUNK_BYTES = 1024 ** 2
+
+
+def _update_array_hash(digest, values):
+    """Hash logical array contents with at most a 1 MiB temporary buffer."""
+    values = np.asarray(values)
+    digest.update(str((values.shape, values.dtype.str)).encode("ascii"))
+    count = max(1, _HASH_CHUNK_BYTES // values.dtype.itemsize)
+    iterator = np.nditer(values, flags=["external_loop", "buffered", "zerosize_ok"],
+                         op_flags=["readonly"], order="C", buffersize=count)
+    for block in iterator:
+        for start in range(0, block.size, count):
+            digest.update(block[start:start + count].tobytes())
+
+
+def _freeze_config(value):
+    if isinstance(value, Mapping):
+        return tuple(sorted((key, _freeze_config(item)) for key, item in value.items()))
+    if isinstance(value, (tuple, list)):
+        return tuple(_freeze_config(item) for item in value)
+    if isinstance(value, np.ndarray):
+        if value.dtype.hasobject:
+            return (value.shape, tuple(_freeze_config(item) for item in value.flat))
+        digest = hashlib.sha256()
+        _update_array_hash(digest, value)
+        return (value.shape, value.dtype.str, digest.digest())
+    return value
+
+
+def _power_cache_key(raw, channels, bands, filter_kwargs):
+    digest = hashlib.sha256()
+    # Hash all channels and the full recording, including preloaded mutable data.
+    chunk_samples = max(1, _HASH_CHUNK_BYTES // (8 * len(raw.ch_names)))
+    for start in range(0, raw.n_times, chunk_samples):
+        stop = min(start + chunk_samples, raw.n_times)
+        values = (raw._data[:, start:stop] if raw.preload
+                  else raw.get_data(start=start, stop=stop))
+        _update_array_hash(digest, values)
+    annotations = raw.annotations
+    provenance = (tuple(raw.ch_names), tuple(raw.get_channel_types()), channels,
+                  float(raw.info["sfreq"]), raw.first_samp, raw.n_times,
+                  annotations.orig_time, annotations.onset, annotations.duration,
+                  tuple(annotations.description), getattr(annotations, "ch_names", ()),
+                  bands, filter_kwargs, "zero", "hilbert-envelope-square")
+    digest.update(pickle.dumps(_freeze_config(provenance), protocol=5))
+    return digest.digest()
+
+
+class ContinuousPowerCache:
+    """Bounded session LRU of raw band power, before any baseline or display.
+
+    Every lookup validates the full current signal. ``info()`` reports resident
+    array bytes, hits/misses/evictions/fallbacks and the last fallback reason.
+    ``clear()`` releases arrays and resets counters. Oversized requests use the
+    original band-at-a-time uncached path. Use from a single UI/session thread.
+    """
+
+    def __init__(self, max_bytes=512 * 1024 ** 2):
+        if isinstance(max_bytes, (bool, np.bool_)) or not isinstance(max_bytes, Integral) or max_bytes < 0:
+            raise ValueError("max_bytes must be a nonnegative integer.")
+        self.max_bytes = int(max_bytes)
+        self.clear()
+
+    def clear(self):
+        self._entries = OrderedDict()
+        self._bytes = 0
+        self._hits = self._misses = self._evictions = self._fallbacks = 0
+        self._status, self._reason = "empty", None
+
+    def info(self):
+        return dict(max_bytes=self.max_bytes, bytes=self._bytes, entries=len(self._entries),
+                    hits=self._hits, misses=self._misses, evictions=self._evictions,
+                    fallbacks=self._fallbacks, status=self._status, reason=self._reason)
+
+    def _lookup(self, key):
+        self._reason = None
+        if key in self._entries:
+            self._hits += 1
+            self._status = "hit"
+            self._entries.move_to_end(key)
+            return self._entries[key]
+        self._misses += 1
+        self._status = "miss"
+        return None
+
+    def _fallback(self, required):
+        self._misses += 1
+        self._fallbacks += 1
+        self._status = "fallback"
+        self._reason = f"Raw power needs {required} bytes, exceeding cache limit {self.max_bytes}; computed uncached."
+
+    def _store(self, key, power):
+        size = sum(values.nbytes for values in power.values())
+        if size > self.max_bytes:
+            self._fallback(size)
+            return
+        while self._bytes + size > self.max_bytes:
+            _, removed = self._entries.popitem(last=False)
+            self._bytes -= sum(values.nbytes for values in removed.values())
+            self._evictions += 1
+        for values in power.values():
+            values.setflags(write=False)
+        self._entries[key] = power
+        self._bytes += size
 
 
 @dataclass
@@ -58,7 +168,8 @@ def adjacent_trial_pairs(events, retained_events):
 
 
 def prepare_continuous_trials(raw, events, audio, extraction, *, trial_ids=None,
-                             pre_seconds=1., post_seconds=1., sigma_seconds=.10, display_sfreq=100.):
+                             pre_seconds=1., post_seconds=1., sigma_seconds=.10, display_sfreq=100.,
+                             cache=None):
     """Filter actual continuous data and keep one baseline across the interval.
 
     Full-record filtering/Hilbert matches extraction and avoids an artificial
@@ -127,20 +238,39 @@ def prepare_continuous_trials(raw, events, audio, extraction, *, trial_ids=None,
         statistics[band] = (mean, std, invalid)
         valid_counts[band] = int((~invalid).sum())
 
-    picked = raw.copy().pick(list(channels)).load_data()
-    sample_times = np.asarray(picked.times)
+    if cache is not None and not isinstance(cache, ContinuousPowerCache):
+        raise TypeError("cache must be a ContinuousPowerCache or None.")
+    sample_times = np.asarray(raw.times)
     filter_kwargs = dict(getattr(extraction, "filter_kwargs", None) or {})
     filter_kwargs.pop("phase", None)
     filter_kwargs.pop("verbose", None)
+    cached_power, key = None, None
+    if cache is not None:
+        required = len(channels) * raw.n_times * 8 * len(extraction.bands)
+        if required > cache.max_bytes:
+            cache._fallback(required)
+        else:
+            key = _power_cache_key(raw, channels, extraction.bands, filter_kwargs)
+            cached_power = cache._lookup(key)
+    picked = None if cached_power is not None else raw.copy().pick(list(channels)).load_data()
+    pending_power = {} if key is not None and cached_power is None else None
     power = {}
     for band, (low, high) in extraction.bands.items():
-        filtered = picked.copy().filter(low, high, phase="zero", verbose="ERROR", **filter_kwargs)
-        filtered.apply_hilbert(envelope=True, verbose="ERROR")
-        values = np.square(filtered.get_data().astype(float, copy=False))
+        if cached_power is not None:
+            values = cached_power[band]
+        else:
+            filtered = picked.copy().filter(low, high, phase="zero", verbose="ERROR", **filter_kwargs)
+            filtered.apply_hilbert(envelope=True, verbose="ERROR")
+            values = np.square(filtered.get_data().astype(float, copy=False))
+            del filtered
+            if pending_power is not None:
+                pending_power[band] = values
         normalized = normalize_power(values, *statistics[band])
         smoothed = gaussian_smooth_nan(normalized, float(raw.info["sfreq"]), sigma_seconds=sigma_seconds)
         power[band] = resample_on_axis(smoothed, sample_times, absolute_times)
-        del filtered, values, normalized, smoothed
+        del values, normalized, smoothed
+    if pending_power is not None:
+        cache._store(key, pending_power)
     audio_times = np.asarray(audio.times, dtype=float)
     audio_values = np.asarray(audio.values, dtype=float)
     if audio_values.ndim != 1 or len(audio_values) != len(audio_times):
@@ -162,15 +292,19 @@ def prepare_continuous_trials(raw, events, audio, extraction, *, trial_ids=None,
         baseline_description="First selected trial baseline for entire display" if mode == "pre_onset" else "Patient baseline file; same reference as extraction",
         valid_baseline_channels=valid_counts, audio_scale=scale,
         selected_events=selected[["original_trial_id", "onset", "offset"]].to_dict("records"),
-        context_event_ids=[int(value) for value in context.original_trial_id], bands=extraction.bands)
+        context_event_ids=[int(value) for value in context.original_trial_id], bands=extraction.bands,
+        trial_exclusions=[(str(channel), int(trial_id))
+            for channel, trial_id in (getattr(extraction, "trial_exclusions", ()) or ())],
+        power_cache=cache.info() if cache is not None else dict(status="disabled", reason=None))
     return ContinuousTrials(absolute_times - first.onset, power, sampled_audio, channels,
         dict(extraction.bands), trial_ids, context, metadata)
 
 
-def load_continuous_trials(fif_path, onset_path, offset_path, wav_path, extraction, **kwargs):
+def load_continuous_trials(fif_path, onset_path, offset_path, wav_path, extraction, *, cache=None, **kwargs):
     """Load original continuous inputs; epoch arrays cannot supply the gap."""
     return prepare_continuous_trials(load_ecog_fif(fif_path, preload=False),
-        load_speech_events(onset_path, offset_path), extract_audio_envelope(wav_path), extraction, **kwargs)
+        load_speech_events(onset_path, offset_path), extract_audio_envelope(wav_path), extraction,
+        cache=cache, **kwargs)
 
 
 def save_continuous_trial_plot(data, result, output_dir):
@@ -192,6 +326,7 @@ def save_continuous_trial_plot(data, result, output_dir):
     fig, axes = plt.subplots(len(unique), 4, figsize=(24, 3.2 * len(unique)), squeeze=False,
         sharex=True, layout="constrained")
     origin = data.metadata["first_onset_seconds"]
+    trial_exclusions = set(tuple(pair) for pair in data.metadata.get("trial_exclusions", ()))
     records = []
     try:
         for col, (band, bounds) in enumerate(data.bands.items()):
@@ -211,15 +346,26 @@ def save_continuous_trial_plot(data, result, output_dir):
                         transform=ax.transAxes, ha="center", va="center", fontsize=8)
                 ax.fill_between(data.times, mean - sem, mean + sem, color=color, alpha=.18)
                 ax.axhline(0, color="gray", linewidth=.6)
+                cluster_channels = [channel for channel, keep in zip(data.channels,
+                    included & (labels == label), strict=True) if keep]
                 for event in data.events.itertuples():
                     selected = event.original_trial_id in data.trial_ids
                     start, stop = event.onset - origin, event.offset - origin
-                    ax.axvspan(start, stop, color="green" if selected else "gray", alpha=.07)
+                    qc_count = sum((channel, int(event.original_trial_id)) in trial_exclusions
+                                   for channel in cluster_channels)
+                    if qc_count:
+                        ax.axvspan(start, stop, facecolor="orange", edgecolor="darkorange",
+                                   hatch="//", alpha=.12)
+                    else:
+                        ax.axvspan(start, stop, color="green" if selected else "gray", alpha=.07)
                     ax.axvline(start, color="gray", linestyle="--", linewidth=.7)
                     ax.axvline(stop, color="gray", linestyle=":", linewidth=.7)
-                    if row == 0:
+                    if row == 0 or qc_count:
                         left, right = max(start, data.times[0]), min(stop, data.times[-1])
-                        ax.text((left + right) / 2, .97, f"Trial {event.original_trial_id}",
+                        event_label = f"Trial {event.original_trial_id}"
+                        if qc_count:
+                            event_label += f" | QC {qc_count}"
+                        ax.text((left + right) / 2, .97, event_label,
                             transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=8)
                 right_ax = ax.twinx()
                 right_ax.plot(data.times, data.audio, color="black", linestyle="--", linewidth=1., alpha=.7)

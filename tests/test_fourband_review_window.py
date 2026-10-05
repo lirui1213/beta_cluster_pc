@@ -78,6 +78,7 @@ def test_notebook_only_fits_and_exports_after_accepted_popup(tmp_path, accepted,
     from fourband.analysis import fit_joint, DEFAULT_BANDS
     from fourband.review import refit_reviewed
     from fourband.workflow import ensure_extraction_config, ensure_first_round
+    from fourband.session import ensure_fit_settings, ensure_trial_review, close_explorers
     features = feature_table()
     first = fit_joint(features, n_clusters=3)
     extraction = object()
@@ -107,7 +108,11 @@ def test_notebook_only_fits_and_exports_after_accepted_popup(tmp_path, accepted,
         RUN_DIR=tmp_path, ROUND1_DIR=tmp_path / "round1", timestamp=lambda: "second", BANDS=DEFAULT_BANDS,
         BAND_WEIGHTS={b: 1 for b in DEFAULT_BANDS}, FEATURE_CORRELATION_THRESHOLD=.95, RANDOM_STATE=50,
         DISPLAY_SMOOTH_SIGMA_SECONDS=.1, DISPLAY_SFREQ=100, FEATURE_SLOPE_METHOD="savgol", SECOND_N_CLUSTERS=4,
-        display=lambda value: None, Image=lambda **kw: None, SECOND_ROUND_READY=True)
+        display=lambda value: None, Image=lambda **kw: None, SECOND_ROUND_READY=True,
+        close_explorers=close_explorers, EXPLORERS={}, TRIAL_QC_READY=True,
+        ensure_fit_settings=ensure_fit_settings, fit_settings=lambda: {}, first_fit_settings={"first_k": 3}, FIRST_N_CLUSTERS=3,
+        WEIGHT_PRESET="legacy", GROUP_WEIGHTS={}, ensure_trial_review=ensure_trial_review,
+        TRIAL_QC_SETTINGS=None, reviewed_trial_settings=None)
     exec(compile(source, "round_two_cell", "exec"), ns)
     assert ns["SECOND_ROUND_READY"] is accepted
     assert calls == (["popup", "fit", "save"] if accepted else ["popup"])

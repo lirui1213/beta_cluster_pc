@@ -29,18 +29,19 @@ def test_targeted_update_preserves_existing_analysis_and_style_assignments(tmp_p
     revised = nbformat.read(destination, as_version=4)
     assert revised.cells[4].source == original_parameters
     assert all(not cell.outputs and cell.execution_count is None for cell in revised.cells if cell.cell_type == "code")
-    added = 0 if notebook.cells[17].source.startswith("## 9.") else 2
+    added = 0 if any(c.cell_type == "code" and "TRIAL_PAIR_IDS =" in c.source for c in notebook.cells) else 2
     assert len(revised.cells) == len(notebook.cells) + added
     assert revised.cells[-1].source == "user_notes = 'keep me'"
-    assert "TRIAL_PAIR_IDS = None" in revised.cells[18].source
-    assert "TRIAL_PRE_SECONDS = 1.0" in revised.cells[18].source
-    assert "TRIAL_POST_SECONDS = 1.0" in revised.cells[18].source
-    assert 'TRIAL_DISPLAY_ROUND = "both"' in revised.cells[18].source
-    assert "ensure_extraction_config" in revised.cells[18].source
-    assert "SECOND_ROUND_READY" in revised.cells[18].source
+    continuous_cell = next(c for c in revised.cells if c.cell_type == "code" and "TRIAL_PAIR_IDS =" in c.source)
+    assert "TRIAL_PAIR_IDS = None" in continuous_cell.source
+    assert "TRIAL_PRE_SECONDS = 1.0" in continuous_cell.source
+    assert "TRIAL_POST_SECONDS = 1.0" in continuous_cell.source
+    assert 'TRIAL_DISPLAY_ROUND = "both"' in continuous_cell.source
+    assert "ensure_extraction_config" in continuous_cell.source
+    assert "SECOND_ROUND_READY" in continuous_cell.source
     assert "load_continuous_trials" in revised.cells[2].source
-    assert "channel_label_toggle=True" in revised.cells[16].source
-    assert "predictor_policy" in revised.cells[10].source
+    assert any("channel_label_toggle=True" in c.source for c in revised.cells)
+    assert any("predictor_policy" in c.source for c in revised.cells)
     nbformat.validate(revised)
     for cell in revised.cells:
         if cell.cell_type == "code":

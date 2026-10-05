@@ -16,6 +16,9 @@ def main():
     parser.add_argument("--second-k", type=int)
     parser.add_argument("--manual-bad", action="append", default=[])
     parser.add_argument("--distance-threshold", type=float)
+    parser.add_argument("--stability-resamples", type=int, default=5)
+    parser.add_argument("--weight-preset", choices=("legacy", "balanced", "morphology", "amplitude"), default="legacy")
+    parser.add_argument("--exclude-trial", action="append", default=[], metavar="CHANNEL:ID")
     args = parser.parse_args()
     folder = Path(__file__).resolve().parent
     project = folder.parent
@@ -50,6 +53,13 @@ def main():
             source += ("\nOPEN_REVIEW_WINDOW = False\n"
                        f"review_settings = ReviewSettings(n_clusters=SECOND_N_CLUSTERS, manual_bad_channels={tuple(args.manual_bad)!r}, "
                        f"pca_distance_threshold={args.distance_threshold!r})\nreview_model = first_result\n")
+        if "WEIGHT_PRESET =" in source:
+            source += (f"\nWEIGHT_PRESET = {args.weight_preset!r}\nOPEN_TRIAL_QC_WINDOW = False\n"
+                "OPEN_EXPLORER = False\nSTABILITY_PROGRESS_WINDOW = False\n"
+                f"STABILITY_RESAMPLES = {args.stability_resamples}\nINSPECTION_BOOTSTRAP_DRAWS = 20\n")
+        if "selected_trial_pairs =" in source and args.exclude_trial:
+            pairs = [(item.rsplit(":", 1)[0], int(item.rsplit(":", 1)[1])) for item in args.exclude_trial]
+            source = source.replace("selected_trial_pairs = ()", f"selected_trial_pairs = {tuple(pairs)!r}")
         cell["source"] = source
     from IPython.core.interactiveshell import InteractiveShell
     from IPython.utils.capture import capture_output
@@ -120,6 +130,15 @@ def main():
             assert display_metadata["trial_ids"] == list(continuous.trial_ids)
         metrics["continuous"] = dict(continuous.metadata,
             output={name: str(path) for name, path in ns["continuous_display_outputs"].items()})
+        metrics["trial_qc"] = dict(candidates=int(ns["trial_quality_report"].candidate.sum()),
+            confirmed=list(extraction.trial_exclusions), ready=ns["TRIAL_QC_READY"])
+        metrics["diagnostics"] = {}
+        for name, directory in ns["diagnostic_outputs"].items():
+            summary = json.loads((directory / "stability_summary.json").read_text(encoding="utf-8"))
+            assert summary["requested_k"] == (first if name == "first" else second).kmeans.n_clusters
+            assert summary["n_included"] == int((first if name == "first" else second).clean_mask.sum())
+            metrics["diagnostics"][name] = dict(summary, output=str(directory))
+        metrics["cache"] = ns["POWER_CACHE"].info()
         (output / "verification_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
         print(json.dumps(metrics, indent=2), flush=True)
         print("Notebook execution and numerical checks passed.", flush=True)

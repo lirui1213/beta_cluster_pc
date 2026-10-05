@@ -229,12 +229,13 @@ def test_changed_extraction_settings_require_reextracting_not_just_refitting():
 def test_failed_reextraction_cannot_publish_a_new_config_for_old_features():
     import json
     path = Path(__file__).resolve().parents[1] / "3-bands/ECoG_4band_clustering_pipeline.ipynb"
-    source = "".join(json.loads(path.read_text(encoding="utf-8"))["cells"][8]["source"])
+    source = next("".join(c["source"]) for c in json.loads(path.read_text(encoding="utf-8"))["cells"]
+        if c["cell_type"] == "code" and "pending_settings = extraction_settings()" in "".join(c["source"]))
     old = {"bands": {"theta": (4, 8)}}
     def fail(*args, **kwargs):
         raise RuntimeError("Failed extraction")
     ns = dict(extraction_settings=lambda: {"bands": {"theta": (5, 9)}}, extracted_settings=old,
-              load_fourband=fail)
+              load_fourband=fail, close_explorers=lambda value: None, EXPLORERS={})
     for name in ("FIF_PATH", "ONSET_PATH", "OFFSET_PATH", "WAV_PATH", "BANDS", "PROGRESS_POINTS",
                  "DURATION_MAD_THRESHOLD", "MIN_TRIALS_AFTER_FILTER", "PRE_POST_WINDOW_SECONDS",
                  "BASELINE_MODE", "BASELINE_WINDOW_SECONDS", "BASELINE_FIF", "BASELINE_SEGMENTS_CSV",

@@ -36,7 +36,7 @@
 
 ## 输出和验证
 
-输出到 `outputs/患者/block/时间戳/`，每次分类保存独立轮次目录，不覆盖旧复审。包含基线质量报告、完整特征、选中特征权重、标签与排除原因、PCA 距离、复审记录、模型以及两轮曲线/音频关系 CSV 和 PNG。`summary.json` 的 silhouette 仅为描述性数值，**未进行稳定性选 K**，标签和颜色不具有固定生理意义。
+输出到 `outputs/患者/block/时间戳/`，每次分类保存独立轮次目录，不覆盖旧复审。包含基线质量报告、完整特征、选中特征权重、标签与排除原因、PCA 距离、复审记录、模型以及两轮曲线/音频关系 CSV 和 PNG。`summary.json` 的 silhouette 仅为描述性数值，**不进行自动选 K**。第 10 节另生成固定 K 的稳定性报告；标签和颜色不具有固定生理意义。
 
 音频关系导出表使用明确前缀：`feature_mean_curve` 为特征提取时平均曲线的关系（音频保留提取单位），`feature_trialwise` 为提取时 trial 级描述，`display_paired_trial_slope_product_mean` 为显示设置下先在同一 trial 内计算斜率乘积、再平均的量（音频按全局峰值归一化），与音频动态图一致。这些量不应直接互换；方法和单位记录于 `relationship_methods.json`。
 
@@ -64,4 +64,65 @@
 & 'E:\anaconda\envs\ECoG_LR_v1\python.exe' 3-bands/verify_notebook.py --baseline-mode pre_onset --first-k 3 --second-k 2
 ```
 
-可选 `--subject`、`--block`、`--manual-bad 电极名` 和 `--distance-threshold 数值`；运行记录存放于 `outputs/verification/`，并验证两轮分类不使用音频特征和双 trial 真实秒数。不要在已修改 Notebook 后直接运行 `create_notebook.py`，无参数会重新生成初始版本。`--update-continuous` 只迁移本次分类政策/连续显示/脑表面开关相关单元，保留参数及用户附加单元并清除旧输出；`--update-review` 更新复审相关单元。
+可选 `--subject`、`--block`、`--manual-bad 电极名`、`--distance-threshold 数值`、`--weight-preset balanced`、`--exclude-trial ECoG_1:0`、`--stability-resamples 5`；运行记录存放于 `outputs/verification/`。验证副本关闭弹窗，默认不剔除候选伪迹；`--exclude-trial` 是验证时明确指定的剔除，不是自动检测剔除。不要在已修改 Notebook 后直接运行 `create_notebook.py`，无参数会重新生成初始版本。使用 `--update-reliability` 迁移新功能，保留原参数、附加单元及新设置，清除旧输出；已有新版本调用旧迁移选项时也会保留可靠性功能。
+
+## Trial 质量人工复审
+
+第 4.1 节打开通道 × 原始 trial 编号的质量复审窗口。所有候选项初始都不勾选，可以查看原始电压、手动勾选未标记项、选择全部候选、清空和撤销。只有点击 `Confirm exclusions` 才应用，取消后不能继续用旧结果重新分类。
+
+检测包括尖峰、相邻采样跳变、平直段、重复极值的截幅候选、非有限采样及已有逐频带基线标记。截幅只称为候选，不假定已知放大器量程；阈值不是经过验证的生理拒绝标准，不增加自动陷波。
+
+`TRIAL_QC_SETTINGS=None` 使用默认值，或在第 2.1 节填写覆盖字典，例如：
+
+```python
+TRIAL_QC_SETTINGS = {
+    "spike_z": 10.0,
+    "jump_z": 10.0,
+    "flat_run_seconds": 0.05,
+    "flat_tolerance_v": 1e-12,
+    "clipping_fraction": 0.10,
+    "clipping_run_seconds": 0.05,
+    "clipping_tolerance_v": 1e-12,
+    "interval": "speech_context",
+}
+```
+
+尖峰参考该通道整段记录的中位数/缩放 MAD，跳变参考相邻差分的中位数/MAD；电压单位为伏。默认检测语音及已有前后窗口；可用 `pre_seconds` / `post_seconds` 覆盖。`interval="speech"` 只检测语音，前后边界须为零。
+
+确认的通道-trial 对在四频带的 speech/pre/post 数组中一起掩蔽，并重新计算特征，不修改原始 FIF。基线无效比例、人工剔除比例和剩余有效 trial 数分别记录。原始坏道或原基线不合格通道不会被恢复；剩余有效 trial 少于 2 会明确标记为不合格电极。重跑复审从未剔除源数据开始，默认重新清空勾选，可恢复此前人工剔除。修改阈值后须重新复审并重跑两轮分类。
+
+复审输出包括候选报告、确认清单、阈值/单位/来源指纹和复审后特征。每轮另保存 `fitted_electrode_features.csv`、`feature_group_budgets.csv` 及确认的 trial 剔除记录。
+
+## 形态、幅度和斜率权重
+
+第 2.1 节的 `WEIGHT_PRESET`：
+
+| 设置 | 形态 : 幅度 : 斜率 |
+| --- | --- |
+| `legacy` | 保持原有权重，为迁移默认值 |
+| `balanced` | 1 : 1 : 1 |
+| `morphology` | 3 : 1 : 1 |
+| `amplitude` | 1 : 3 : 1 |
+| `custom` | 使用 `GROUP_WEIGHTS` |
+
+三个组互斥，零权重组在冗余筛选之前移除；组内按保留特征数分配预算，频带总预算仍由 `BAND_WEIGHTS` 决定。某组无可用特征时，预算在该频带其余可用组内重新分配，实际预算和成员有 CSV 记录。每个频带必须至少有一组可用。
+
+形态组包括早/中/晚均值及差值、正负面积、峰位置、峰宽和回落/反弹等；幅度组包括 energy、前后功率及峰值幅度；自身斜率归斜率组。形态特征仍可能依赖幅度，`morphology` 不等于完全去除幅度的波形聚类。修改预设、组权重、频带权重或第一轮 K 后重跑第一轮及第二轮。音频列仍不能进入模型。
+
+## 稳定性与同类内部差异
+
+第 10 节对每个已确认轮次的固定 K、固定电极集合评估：按时间分半、随机分半及 trial bootstrap。每次重新聚合特征、筛选、填补、标准化和拟合；同一次抽样在四频带/所有通道中一致，重复抽中的 trial 保留次数。默认 `STABILITY_RESAMPLES=30`，每轮 92 次比较拟合，另验证一次全数据参考；计算可能需要几分钟。进度窗可取消，已有分类保留，部分报告会标记取消。
+
+`stability_summary.json`、`stability_replicates.csv`、`stability_channels.csv` 和 `stability.png` 保存 ARI、最大重叠匹配后的通道一致度、支持覆盖率及失败原因。样本支持不足不改变电极集合；小簇/塌缩结果计入已支持重复并单独标记，不隐藏不利结果。没有支持重复时指标不可用，但不会触发 `No eligible K` 或自动换 K。通道一致度不是生理分类正确的概率。
+
+同目录的四张 `*_inspection.png` 包括最多 40 条电极平均细线、类别均值、电极热图和选定通道的 trial 热图；完整电极统计仍导出到 CSV。横轴明确为时长归一化语音进程，而非原始秒数；trial 编号不重排。`INSPECTION_BOOTSTRAP_DRAWS=100` 生成固定标签/电极条件下的逐点 trial 重采样 95% 置信带，设为 0 可关闭。电极 SEM、trial 置信带和归类稳定度不同，不作为显著性检验。
+
+## 交互查看与缓存
+
+第 11 节 `OPEN_EXPLORER=True` 打开曲线窗口：前两个箭头切换相邻配对，后续菜单依次为配对、频带、类别、通道和视图；可选择 `Continuous` 或 `Cluster detail`。输入秒单位 sigma 后点击 Apply，Save 保存当前图和查看参数；关闭窗口可继续运行 Notebook。操作不改变类数、trial 剔除或标签。
+
+`LINK_SURFACE_EXPLORER=True` 时，脑表面窗口右键点选电极可更新其四频带曲线。点击脑表面或背景不会误选；按 CSV 实际通道名联动，类别可见性和编号开关仍有效。Tk 与 VTK 共享事件泵，不需要 Qt；关闭任一窗口后不会继续调用已关闭对象。
+
+原始连续曲线不会因分类剔除而删掉真实记录：被剔除的选定通道 trial 标成 QC，类别平均连续图标注该事件中剔除的成员数。它们是原始信号对照，不应误读为重新纳入分类。
+
+`CACHE_MAX_MB=512` 设置本次内核的有界连续功率缓存。切换配对或显示平滑时复用带通/Hilbert 功率，基线在缓存之后按当前配置应用；信号内容、采样率、通道次序、频带或滤波参数改变会使缓存失效。为避免修改预加载数据后误用缓存，每次查询仍校验整段数据，因此并非零耗时。缓存不足时明确报告并正确退回逐频带计算；窗口的 Clear cache 或 `POWER_CACHE.clear()` 释放内存，`POWER_CACHE.info()` 查看命中/容量/退回原因。缓存不提交到 Git。

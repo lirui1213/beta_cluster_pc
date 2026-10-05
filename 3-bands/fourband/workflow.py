@@ -10,6 +10,7 @@ from sklearn.metrics import silhouette_score
 
 from .review import pca_review_table
 from .plots import save_round_plots, summarize_relationship
+from .weights import weight_audit
 from signal_processing import finite_mean
 
 
@@ -50,12 +51,17 @@ def save_round(extraction, clustering, output_dir, *, n_clusters, audit=None,
     output.mkdir(parents=True, exist_ok=False)
     config = dict(round_config or {})
     config.update(n_clusters=int(n_clusters), display_sigma_seconds=float(sigma_seconds),
-                  display_sfreq=float(display_sfreq), stability_evaluated=False)
+                  display_sfreq=float(display_sfreq), stability_evaluated=False,
+                  trial_exclusions=list(getattr(extraction, "trial_exclusions", ())),
+                  trial_qc_provenance=getattr(extraction, "trial_qc_provenance", None),
+                  feature_settings=getattr(extraction, "feature_settings", None))
     (output / "round_config.json").write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
     try:
         if tuple(extraction.features.channel) != clustering.channels:
             raise ValueError("Extraction must align with clustering before export.")
         assignments = clustering.to_frame()
+        extraction.features.to_csv(output / "fitted_electrode_features.csv", index=False, encoding="utf-8-sig")
+        weight_audit(clustering).to_csv(output / "feature_group_budgets.csv", index=False, encoding="utf-8-sig")
         reasons = extraction.features.get("exclusion_reason", pd.Series("", index=extraction.features.index)).to_list()
         if audit is not None:
             if tuple(audit.channel) != clustering.channels:
