@@ -33,8 +33,9 @@ import matplotlib.pyplot as plt
 from IPython.display import display, Image
 from fourband.analysis import DEFAULT_BANDS, load_fourband, fit_joint
 from fourband.review import pca_review_table, refit_reviewed
+from fourband.review_window import FourBandReviewWindow, ReviewSettings
 from fourband.workflow import save_extraction, save_round, ensure_extraction_config, ensure_first_round
-from visualization import BadChannelReviewWindow, render_electrode_clusters, render_selectable_electrode_class
+from visualization import render_electrode_clusters, render_selectable_electrode_class
 pd.set_option("display.max_columns", 24)
 def timestamp():
     return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S_%f")
@@ -154,54 +155,59 @@ display(Image(filename=str(ROUND1_DIR / "pca_clusters.png")))
 display(Image(filename=str(ROUND1_DIR / "fourband_cluster_grid.png")))
 for band in BANDS:
     display(Image(filename=str(ROUND1_DIR / f"{band}_audio_dynamics.png")))'''),
-        m("## 6. PCA 复审参数\n\n全局距离为前三个 PC 到所有合格电极坐标中位数的欧氏距离；簇内距离到所属簇中心。孤立电极的簇内距离可能为零，故默认参考为 global。阈值没有通用数值，请查看距离表再设置。排除决定取并集，原始坏道不会恢复。"),
-        c('''ensure_first_round(globals().get("first_extraction"), extraction)
-BAD_CLUSTERS = ()
-MANUAL_BAD_CHANNELS = ()
-PCA_DISTANCE_THRESHOLD = None
-PCA_DISTANCE_REFERENCE = "global"  # "global" or "cluster"
-OPEN_REVIEW_WINDOW = False
+        m("## 6. PCA 复审准备\n\n下一节默认打开复审弹窗，设置距离阈值、参考方式、整类/指定电极剔除及第二轮 K。全局距离为前三个 PC 到所有合格电极坐标中位数的欧氏距离；簇内距离到所属簇中心。孤立电极的簇内距离可能为零，阈值没有通用数值。原始坏道不会恢复。"),
+        c('''SECOND_ROUND_READY = False
+ensure_first_round(globals().get("first_extraction"), extraction)
+OPEN_REVIEW_WINDOW = True
+if globals().get("review_model") is not first_result:
+    review_settings = ReviewSettings(n_clusters=SECOND_N_CLUSTERS)
+    review_model = first_result
 
 pca_distances = pca_review_table(first_result)
 display(pca_distances.sort_values("pca_global_distance", ascending=False).head(25))'''),
-        m("## 7. 第二轮联合分类与音频关系\n\n修改复审条件或 SECOND_N_CLUSTERS 后只需重跑本节。若改变频带、基线或特征提取参数，请重新提取并执行第一轮。两轮都不自动改 K，不代表通过稳定性检验。"),
-        c('''ensure_extraction_config(extraction_settings(), extracted_settings)
+        m("## 7. 弹窗复审与第二轮联合分类\n\n在窗口中设置第二轮 K 和剔除条件，点击确认后才重新分类。取消或关闭窗口不执行第二轮，也不显示旧的脑表面结果。重跑本节会再次打开窗口，并保留同一第一轮模型下最后确认的设置。若改变提取参数，请重新提取并执行第一轮。类别数仍由你决定，不代表通过稳定性检验。"),
+        c('''SECOND_ROUND_READY = False
+ensure_extraction_config(extraction_settings(), extracted_settings)
 ensure_first_round(globals().get("first_extraction"), extraction)
-selected_bad_clusters = tuple(BAD_CLUSTERS)
-selected_manual_channels = tuple(MANUAL_BAD_CHANNELS)
-selected_second_k = SECOND_N_CLUSTERS
+if globals().get("review_model") is not first_result:
+    review_settings = ReviewSettings(n_clusters=SECOND_N_CLUSTERS)
+    review_model = first_result
 if OPEN_REVIEW_WINDOW:
-    review = BadChannelReviewWindow(first_result, initial_second_k=selected_second_k).show()
-    if review is not None:
-        selected_bad_clusters = tuple(sorted(set(selected_bad_clusters) | set(review.bad_clusters)))
-        selected_manual_channels = tuple(sorted(set(selected_manual_channels) | set(review.manual_bads)))
-        selected_second_k = review.n_clusters
-
-second_result, review_audit = refit_reviewed(features, first_result, n_clusters=selected_second_k,
-    bad_clusters=selected_bad_clusters, manual_bad_channels=selected_manual_channels,
-    pca_distance_threshold=PCA_DISTANCE_THRESHOLD, distance_reference=PCA_DISTANCE_REFERENCE,
-    bands=BANDS, band_weights=BAND_WEIGHTS, correlation_threshold=FEATURE_CORRELATION_THRESHOLD, random_state=RANDOM_STATE)
-ROUND2_DIR = RUN_DIR / ("round2_" + timestamp())
-second_assignments = save_round(extraction, second_result, ROUND2_DIR, n_clusters=selected_second_k,
-    audit=review_audit, sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, display_sfreq=DISPLAY_SFREQ,
-    slope_method=FEATURE_SLOPE_METHOD, round_config=dict(round=2, first_round=str(ROUND1_DIR),
+    selected_review = FourBandReviewWindow(first_result, initial=review_settings).show()
+else:
+    selected_review = review_settings
+if selected_review is None:
+    print("已取消复审，未执行第二轮聚类。")
+else:
+    review_settings = selected_review
+    selected_bad_clusters = selected_review.bad_clusters
+    selected_manual_channels = selected_review.manual_bad_channels
+    selected_second_k = selected_review.n_clusters
+    pending_second, pending_audit = refit_reviewed(features, first_result, **selected_review.refit_kwargs(),
+        bands=BANDS, band_weights=BAND_WEIGHTS, correlation_threshold=FEATURE_CORRELATION_THRESHOLD, random_state=RANDOM_STATE)
+    pending_round2_dir = RUN_DIR / ("round2_" + timestamp())
+    pending_assignments = save_round(extraction, pending_second, pending_round2_dir, n_clusters=selected_second_k,
+        audit=pending_audit, sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, display_sfreq=DISPLAY_SFREQ,
+        slope_method=FEATURE_SLOPE_METHOD, round_config=dict(round=2, first_round=str(ROUND1_DIR),
         bad_clusters=selected_bad_clusters, manual_bad_channels=selected_manual_channels,
-        pca_distance_threshold=PCA_DISTANCE_THRESHOLD, distance_reference=PCA_DISTANCE_REFERENCE,
+        pca_distance_threshold=selected_review.pca_distance_threshold, distance_reference=selected_review.distance_reference,
         band_weights=BAND_WEIGHTS, random_state=RANDOM_STATE, correlation_threshold=FEATURE_CORRELATION_THRESHOLD))
-display(review_audit.loc[review_audit.excluded_final])
-display(second_assignments.groupby("label").size().rename("n_electrodes"))
-display(Image(filename=str(ROUND2_DIR / "pca_clusters.png")))
-display(Image(filename=str(ROUND2_DIR / "fourband_cluster_grid.png")))
-for band in BANDS:
-    display(Image(filename=str(ROUND2_DIR / f"{band}_audio_dynamics.png")))
-print(ROUND2_DIR)'''),
+    second_result, review_audit, ROUND2_DIR, second_assignments = pending_second, pending_audit, pending_round2_dir, pending_assignments
+    SECOND_ROUND_READY = True
+    display(review_audit.loc[review_audit.excluded_final])
+    display(second_assignments.groupby("label").size().rename("n_electrodes"))
+    display(Image(filename=str(ROUND2_DIR / "pca_clusters.png")))
+    display(Image(filename=str(ROUND2_DIR / "fourband_cluster_grid.png")))
+    for band in BANDS:
+        display(Image(filename=str(ROUND2_DIR / f"{band}_audio_dynamics.png")))
+    print(ROUND2_DIR)'''),
         m("## 8. 可选脑表面显示\n\n使用第二轮联合标签，绘图参数不影响分类。"),
-        c('''if RUN_3D_RENDER:
+        c('''if RUN_3D_RENDER and SECOND_ROUND_READY:
     render_electrode_clusters(ELECTRODE_CSV, dict(zip(second_result.channels, map(int, second_result.labels))),
         subjects_dir=SUBJECTS_DIR, subject=SURFACE_SUBJECT, reference_mri=REFERENCE_MRI,
         hemispheres=HEMISPHERES, brain_color=SURFACE_COLOR, brain_opacity=SURFACE_OPACITY,
         screenshot=ROUND2_DIR / "joint_electrode_clusters.png")
-if RUN_SELECTABLE_CLUSTER_RENDER:
+if RUN_SELECTABLE_CLUSTER_RENDER and SECOND_ROUND_READY:
     render_selectable_electrode_class(ELECTRODE_CSV, dict(zip(second_result.channels, map(int, second_result.labels))),
         subjects_dir=SUBJECTS_DIR, subject=SURFACE_SUBJECT, reference_mri=REFERENCE_MRI,
         hemispheres=HEMISPHERES, brain_color=SURFACE_COLOR, brain_opacity=SURFACE_OPACITY)'''),
@@ -211,7 +217,41 @@ if RUN_SELECTABLE_CLUSTER_RENDER:
     return notebook
 
 
+def update_review_cells(output):
+    """Update the approved UI cells without replacing user analysis parameters."""
+    existing = nbf.read(output, as_version=4)
+    revised = build_notebook()
+    for index in (11, 12, 13, 14):
+        if existing.cells[index].cell_type != revised.cells[index].cell_type:
+            raise ValueError("Notebook layout changed; review cells require a targeted manual update.")
+        existing.cells[index].source = revised.cells[index].source
+        if existing.cells[index].cell_type == "code":
+            existing.cells[index].outputs = []
+            existing.cells[index].execution_count = None
+    initialization = existing.cells[2]
+    initialization.source = initialization.source.replace(
+        "from visualization import BadChannelReviewWindow, render_electrode_clusters, render_selectable_electrode_class",
+        "from visualization import render_electrode_clusters, render_selectable_electrode_class")
+    import_line = "from fourband.review_window import FourBandReviewWindow, ReviewSettings"
+    if import_line not in initialization.source:
+        initialization.source = initialization.source.replace(
+            "from fourband.review import pca_review_table, refit_reviewed",
+            "from fourband.review import pca_review_table, refit_reviewed\n" + import_line)
+    existing.cells[16].source = existing.cells[16].source.replace(
+        "if RUN_3D_RENDER:", "if RUN_3D_RENDER and SECOND_ROUND_READY:").replace(
+        "if RUN_SELECTABLE_CLUSTER_RENDER:", "if RUN_SELECTABLE_CLUSTER_RENDER and SECOND_ROUND_READY:")
+    nbf.validate(existing)
+    nbf.write(existing, output)
+
+
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--update-review", action="store_true")
+    args = parser.parse_args()
     output = Path(__file__).with_name("ECoG_4band_clustering_pipeline.ipynb")
-    nbf.write(build_notebook(), output)
+    if args.update_review:
+        update_review_cells(output)
+    else:
+        nbf.write(build_notebook(), output)
     print(output)

@@ -28,10 +28,9 @@ def pca_review_table(first):
     return table
 
 
-def refit_reviewed(features, first, *, n_clusters=4, bad_clusters=(), manual_bad_channels=(),
-                   pca_distance_threshold=None, distance_reference="global", **fit_kwargs):
-    if tuple(features.channel.astype(str)) != first.channels:
-        raise ValueError("Feature rows do not align with first-round electrodes.")
+def review_exclusion_audit(first, *, bad_clusters=(), manual_bad_channels=(),
+                           pca_distance_threshold=None, distance_reference="global"):
+    """One exclusion rule shared by the popup preview and the actual refit."""
     if distance_reference not in {"global", "cluster"}:
         raise ValueError("distance_reference must be global or cluster.")
     if pca_distance_threshold is not None and (not np.isfinite(pca_distance_threshold) or pca_distance_threshold <= 0):
@@ -49,6 +48,17 @@ def refit_reviewed(features, first, *, n_clusters=4, bad_clusters=(), manual_bad
     audit["distance_threshold"] = pca_distance_threshold
     audit["excluded_distance"] = False if pca_distance_threshold is None else audit[distance_column] > pca_distance_threshold
     mask = audit[["excluded_initial", "excluded_cluster", "excluded_manual", "excluded_distance"]].any(axis=1).to_numpy()
+    audit["excluded_final"] = mask
+    return audit
+
+
+def refit_reviewed(features, first, *, n_clusters=4, bad_clusters=(), manual_bad_channels=(),
+                   pca_distance_threshold=None, distance_reference="global", **fit_kwargs):
+    if tuple(features.channel.astype(str)) != first.channels:
+        raise ValueError("Feature rows do not align with first-round electrodes.")
+    audit = review_exclusion_audit(first, bad_clusters=bad_clusters, manual_bad_channels=manual_bad_channels,
+        pca_distance_threshold=pca_distance_threshold, distance_reference=distance_reference)
+    mask = audit.excluded_final.to_numpy()
     result = fit_joint(features, n_clusters=n_clusters, bad_mask=mask, **fit_kwargs)
     audit["excluded_final"] = ~result.clean_mask
     audit["second_label"] = result.labels

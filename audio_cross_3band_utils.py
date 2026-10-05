@@ -213,6 +213,16 @@ def load_speech_events(
         offset_values = None if offset_source is None else _load_array_source(offset_source)
         frame = _array_to_event_frame(onset_values, offset_values)
 
+    if len(frame) == 0:
+        source_name = str(source) if isinstance(source, (str, Path)) else "in-memory event source"
+        offset_name = str(offset_source) if isinstance(offset_source, (str, Path)) else "in-memory or embedded offsets"
+        raise ValueError(
+            "No speech events were loaded (0 onset/offset pairs). "
+            f"Event source: {source_name}; offset source: {offset_name}. "
+            "Check the selected subject/block and regenerate or select non-empty event files; "
+            "baseline normalization and clustering cannot run without speech events."
+        )
+
     onset_name = onset_column or _find_event_column(
         frame, ("onset", "speech onset", "speech_onset", "start", "start time")
     )
@@ -337,6 +347,9 @@ def filter_duration_outlier_trials(
     required_columns = {"onset", "offset", "duration"}
     if not required_columns.issubset(events.columns):
         raise ValueError(f"Events must contain columns {sorted(required_columns)}.")
+
+    if len(events) == 0:
+        raise ValueError("No speech events available for duration filtering; check onset/offset inputs.")
 
     frame = events.copy().reset_index(drop=True)
     if "original_trial_id" not in frame:

@@ -46,9 +46,10 @@ def main():
                     lines[i] = f"{key} = {overrides[key]!r}"
             source = "\n".join(lines)
             source += f"\nOUTPUT_ROOT = Path({str(output)!r})\n"
-        if "PCA_DISTANCE_THRESHOLD =" in source:
-            source += (f"\nMANUAL_BAD_CHANNELS = {tuple(args.manual_bad)!r}\n"
-                       f"PCA_DISTANCE_THRESHOLD = {args.distance_threshold!r}\nOPEN_REVIEW_WINDOW = False\n")
+        if "OPEN_REVIEW_WINDOW =" in source:
+            source += ("\nOPEN_REVIEW_WINDOW = False\n"
+                       f"review_settings = ReviewSettings(n_clusters=SECOND_N_CLUSTERS, manual_bad_channels={tuple(args.manual_bad)!r}, "
+                       f"pca_distance_threshold={args.distance_threshold!r})\nreview_model = first_result\n")
         cell["source"] = source
     from IPython.core.interactiveshell import InteractiveShell
     from IPython.utils.capture import capture_output
