@@ -939,6 +939,72 @@ def _set_actor_color(actor: Any, color: Sequence[float]) -> None:
         prop.color = tuple(map(float, color[:3]))
 
 
+class _SurfaceChannelLabels:
+    """Manage a lazy label actor independently of electrode meshes."""
+
+    def __init__(
+        self,
+        plotter: Any,
+        coordinates: FloatArray,
+        channels: Sequence[str],
+        indices: Sequence[int],
+        *,
+        visible: bool,
+        toggle: bool,
+    ) -> None:
+        self.plotter = plotter
+        self.coordinates = coordinates
+        self.channels = np.asarray(channels, dtype=str)
+        self.visible = bool(visible)
+        self.actor: Any = None
+        self.actor_indices: tuple[int, ...] | None = None
+        self.update(indices)
+        if toggle:
+            plotter.add_checkbox_button_widget(
+                self.set_visible,
+                value=self.visible,
+                position=(10, 10),
+                size=20,
+                border_size=2,
+                color_on="black",
+                color_off="lightgray",
+            )
+            plotter.add_text(
+                "Channel labels",
+                position=(38, 10),
+                font_size=8,
+                color="black",
+                name="channel_label_toggle_text",
+            )
+
+    def update(self, indices: Sequence[int]) -> None:
+        self.indices = tuple(int(index) for index in indices)
+        if self.visible and self.indices and self.indices != self.actor_indices:
+            if self.actor is not None:
+                self.plotter.remove_actor(self.actor, reset_camera=False, render=False)
+            selected = list(self.indices)
+            self.actor = self.plotter.add_point_labels(
+                self.coordinates[selected],
+                self.channels[selected].tolist(),
+                name="surface_channel_labels",
+                show_points=False,
+                always_visible=True,
+                shape=None,
+                font_size=12,
+                text_color="black",
+                reset_camera=False,
+                render=False,
+            )
+            self.actor_indices = self.indices
+        if self.actor is not None:
+            _set_actor_visibility(self.actor, self.visible and bool(self.indices))
+
+    def set_visible(self, visible: bool) -> None:
+        self.visible = bool(visible)
+        self.update(self.indices)
+        self.plotter.render()
+
+
 def render_selectable_electrode_class(
     electrode_csv: str | Path,
     labels: Mapping[str, int] | Sequence[int],
@@ -969,9 +1035,16 @@ def render_selectable_electrode_class(
     slider_tube_width: float = 0.005,
     slider_title_height: float = 0.020,
     slider_text_font_size: int = 8,
+    channel_label_toggle: bool = False,
+    show_channel_labels: bool = False,
     show: bool = True,
 ) -> Any:
-    """Render one selectable electrode class with PyVista popup controls."""
+    """Render one selectable electrode class with PyVista popup controls.
+
+    ``channel_label_toggle`` adds a compact checkbox, initially off unless
+    ``show_channel_labels`` is true. CSV channel identities follow the visible
+    class without changing the camera or electrode styling.
+    """
 
     try:
         import matplotlib.colors as mcolors
@@ -1052,6 +1125,18 @@ def render_selectable_electrode_class(
         actors_by_label[int(label)].append(actor)
 
     state = {"label": int(selected_label), "color": selected_rgb}
+    channel_labels = (
+        _SurfaceChannelLabels(
+            plotter,
+            display_coordinates,
+            electrodes["channel"].tolist(),
+            np.flatnonzero(aligned_labels == state["label"]),
+            visible=show_channel_labels,
+            toggle=channel_label_toggle,
+        )
+        if channel_label_toggle or show_channel_labels
+        else None
+    )
 
     def apply_selection() -> None:
         for label, actors in actors_by_label.items():
@@ -1060,6 +1145,8 @@ def render_selectable_electrode_class(
                 _set_actor_visibility(actor, visible)
                 if visible:
                     _set_actor_color(actor, state["color"])
+        if channel_labels is not None:
+            channel_labels.update(np.flatnonzero(aligned_labels == state["label"]))
         if hasattr(plotter, "render"):
             plotter.render()
 
@@ -1142,6 +1229,8 @@ def render_electrode_clusters(
     tumor_color: str = "yellow",
     tumor_opacity: float = 0.30,
     background_color: str = "white",
+    channel_label_toggle: bool = False,
+    show_channel_labels: bool = False,
     show: bool = True,
     screenshot: str | Path | None = None,
 ) -> Any:
@@ -1152,6 +1241,8 @@ def render_electrode_clusters(
     both arguments enables FreeSurfer tkRAS transformation and pial surfaces.
     ``reference_mri`` may be supplied alone to transform coordinates without
     drawing pial surfaces. Labels equal to ``-1`` are always white.
+    ``channel_label_toggle`` adds an initially-off channel-name checkbox;
+    ``show_channel_labels`` explicitly enables CSV channel identities at start.
     """
 
     try:
@@ -1222,6 +1313,15 @@ def render_electrode_clusters(
         render_points_as_spheres=True,
         point_size=point_size,
     )
+    if channel_label_toggle or show_channel_labels:
+        _SurfaceChannelLabels(
+            plotter,
+            display_coordinates,
+            electrodes["channel"].tolist(),
+            np.arange(len(electrodes)),
+            visible=show_channel_labels,
+            toggle=channel_label_toggle,
+        )
     plotter.set_background(background_color)
     plotter.camera_position = camera_position
     if screenshot is not None and not show:

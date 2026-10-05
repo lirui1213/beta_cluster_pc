@@ -1,5 +1,6 @@
 """Build the four-band experiment notebook using structured notebook cells."""
 from pathlib import Path
+import ast
 import nbformat as nbf
 
 
@@ -7,7 +8,7 @@ def build_notebook():
     m, c = nbf.v4.new_markdown_cell, nbf.v4.new_code_cell
     notebook = nbf.v4.new_notebook()
     notebook.cells = [
-        m("# 四频带联合 ECoG 分类\n\nTheta、Beta1、Beta2、High-gamma 共同产生一套电极标签。两轮 K 手动指定；第一轮 PCA 复审后独立重拟合第二轮。曲线与音频关系为描述性结果，不自动认定为生理类型或稳定分类。"),
+        m("# 四频带联合 ECoG 分类\n\nTheta、Beta1、Beta2、High-gamma 共同产生一套电极标签。分类只使用 ECoG 自身特征，音频仅作显示和描述性对照。两轮 K 手动指定；第一轮 PCA 复审后独立重拟合第二轮。第 9 节显示两个相邻 trial 及中间间隔的真实连续曲线。"),
         m("## 1. 初始化"),
         c('''from pathlib import Path
 import os
@@ -30,12 +31,18 @@ for name in list(sys.modules):
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import importlib
+import visualization
+importlib.reload(visualization)
 from IPython.display import display, Image
 from fourband.analysis import DEFAULT_BANDS, load_fourband, fit_joint
 from fourband.review import pca_review_table, refit_reviewed
 from fourband.review_window import FourBandReviewWindow, ReviewSettings
 from fourband.workflow import save_extraction, save_round, ensure_extraction_config, ensure_first_round
+from fourband.continuous import adjacent_trial_pairs, load_continuous_trials, save_continuous_trial_plot
+from audio_cross_3band_utils import load_speech_events
 from visualization import render_electrode_clusters, render_selectable_electrode_class
+SECOND_ROUND_READY = False
 pd.set_option("display.max_columns", 24)
 def timestamp():
     return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S_%f")
@@ -140,16 +147,18 @@ display(pd.DataFrame(report))
 display(features[["channel", "is_bad", "exclusion_reason"]])
 print(f"Joint eligible electrodes: {int((~features.is_bad).sum())}/{len(features)}")
 print(RUN_DIR)'''),
-        m("## 5. 第一轮联合分类与音频关系\n\nPCA 用于显示和复审；K-means 使用四频带筛选后的加权特征。各频带的总权重不随保留特征数增长。"),
-        c('''ensure_extraction_config(extraction_settings(), extracted_settings)
+        m("## 5. 第一轮 ECoG 联合分类\n\nPCA 用于显示和复审；K-means 只使用四频带 ECoG 的形态、功率和斜率特征，音频耦合特征不参与分类。各频带总权重不随保留特征数增长。下图为多 trial 时长归一化平均；第 9 节为真实连续双 trial 曲线。"),
+        c('''SECOND_ROUND_READY = False
+ensure_extraction_config(extraction_settings(), extracted_settings)
 pending_first = fit_joint(features, n_clusters=FIRST_N_CLUSTERS, bands=BANDS,
     band_weights=BAND_WEIGHTS, correlation_threshold=FEATURE_CORRELATION_THRESHOLD, random_state=RANDOM_STATE)
 pending_round1_dir = RUN_DIR / ("round1_" + timestamp())
 first_assignments = save_round(extraction, pending_first, pending_round1_dir, n_clusters=FIRST_N_CLUSTERS,
     sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, display_sfreq=DISPLAY_SFREQ, slope_method=FEATURE_SLOPE_METHOD,
-    round_config=dict(round=1, band_weights=BAND_WEIGHTS, random_state=RANDOM_STATE,
+    round_config=dict(round=1, predictor_policy="ecog_only", band_weights=BAND_WEIGHTS, random_state=RANDOM_STATE,
         correlation_threshold=FEATURE_CORRELATION_THRESHOLD))
 first_result, first_extraction, ROUND1_DIR = pending_first, extraction, pending_round1_dir
+SECOND_ROUND_READY = False
 display(first_assignments.groupby("label").size().rename("n_electrodes"))
 display(Image(filename=str(ROUND1_DIR / "pca_clusters.png")))
 display(Image(filename=str(ROUND1_DIR / "fourband_cluster_grid.png")))
@@ -191,7 +200,7 @@ else:
         slope_method=FEATURE_SLOPE_METHOD, round_config=dict(round=2, first_round=str(ROUND1_DIR),
         bad_clusters=selected_bad_clusters, manual_bad_channels=selected_manual_channels,
         pca_distance_threshold=selected_review.pca_distance_threshold, distance_reference=selected_review.distance_reference,
-        band_weights=BAND_WEIGHTS, random_state=RANDOM_STATE, correlation_threshold=FEATURE_CORRELATION_THRESHOLD))
+        predictor_policy="ecog_only", band_weights=BAND_WEIGHTS, random_state=RANDOM_STATE, correlation_threshold=FEATURE_CORRELATION_THRESHOLD))
     second_result, review_audit, ROUND2_DIR, second_assignments = pending_second, pending_audit, pending_round2_dir, pending_assignments
     SECOND_ROUND_READY = True
     display(review_audit.loc[review_audit.excluded_final])
@@ -201,16 +210,48 @@ else:
     for band in BANDS:
         display(Image(filename=str(ROUND2_DIR / f"{band}_audio_dynamics.png")))
     print(ROUND2_DIR)'''),
-        m("## 8. 可选脑表面显示\n\n使用第二轮联合标签，绘图参数不影响分类。"),
+        m("## 8. 可选脑表面显示\n\n使用第二轮联合标签，绘图参数不影响分类。窗口的 Channel labels 开关显示或隐藏实际通道名，选择类别时编号随可见电极切换。"),
         c('''if RUN_3D_RENDER and SECOND_ROUND_READY:
     render_electrode_clusters(ELECTRODE_CSV, dict(zip(second_result.channels, map(int, second_result.labels))),
         subjects_dir=SUBJECTS_DIR, subject=SURFACE_SUBJECT, reference_mri=REFERENCE_MRI,
         hemispheres=HEMISPHERES, brain_color=SURFACE_COLOR, brain_opacity=SURFACE_OPACITY,
-        screenshot=ROUND2_DIR / "joint_electrode_clusters.png")
+        channel_label_toggle=True, screenshot=ROUND2_DIR / "joint_electrode_clusters.png")
 if RUN_SELECTABLE_CLUSTER_RENDER and SECOND_ROUND_READY:
     render_selectable_electrode_class(ELECTRODE_CSV, dict(zip(second_result.channels, map(int, second_result.labels))),
         subjects_dir=SUBJECTS_DIR, subject=SURFACE_SUBJECT, reference_mri=REFERENCE_MRI,
-        hemispheres=HEMISPHERES, brain_color=SURFACE_COLOR, brain_opacity=SURFACE_OPACITY)'''),
+        hemispheres=HEMISPHERES, brain_color=SURFACE_COLOR, brain_opacity=SURFACE_OPACITY,
+        channel_label_toggle=True)'''),
+        m("## 9. 相邻双 trial 连续显示\n\n横轴为相对第一次 onset 的真实秒数，完整保留两个 trial 及中间间隔。原始 trial 编号从 0 开始，不是筛选后的行号；从下方相邻配对表选取。音频包络保留，分类不使用音频。pre_onset 模式的整幅连续图统一使用第一个 trial 的基线；SEM 表示电极间差异，不是两个 trial 的置信区间。重跑本节不会重新分类。"),
+        c('''TRIAL_PAIR_IDS = None  # None: first available pair; or (original_id_1, original_id_2)
+TRIAL_PRE_SECONDS = 1.0
+TRIAL_POST_SECONDS = 1.0
+TRIAL_DISPLAY_ROUND = "both"  # "first", "second", "both"
+
+ensure_extraction_config(extraction_settings(), extracted_settings)
+ensure_first_round(globals().get("first_extraction"), extraction)
+if TRIAL_DISPLAY_ROUND not in {"first", "second", "both"}:
+    raise ValueError("TRIAL_DISPLAY_ROUND must be first, second or both.")
+trial_pairs = adjacent_trial_pairs(load_speech_events(ONSET_PATH, OFFSET_PATH), next(iter(extraction.epochs.values())).events)
+display(trial_pairs)
+display_rounds = []
+if TRIAL_DISPLAY_ROUND in {"first", "both"}:
+    display_rounds.append(("first", first_result, ROUND1_DIR))
+if TRIAL_DISPLAY_ROUND in {"second", "both"} and SECOND_ROUND_READY:
+    display_rounds.append(("second", second_result, ROUND2_DIR))
+if TRIAL_DISPLAY_ROUND == "second" and not SECOND_ROUND_READY:
+    raise ValueError("Confirm a fresh second-round review before displaying its trials.")
+if TRIAL_DISPLAY_ROUND == "both" and not SECOND_ROUND_READY:
+    print("第二轮未确认，仅显示第一轮连续曲线。")
+continuous_trials = load_continuous_trials(FIF_PATH, ONSET_PATH, OFFSET_PATH, WAV_PATH, extraction,
+    trial_ids=TRIAL_PAIR_IDS, pre_seconds=TRIAL_PRE_SECONDS, post_seconds=TRIAL_POST_SECONDS,
+    sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, display_sfreq=DISPLAY_SFREQ)
+continuous_display_outputs = {}
+for round_name, fitted_result, round_dir in display_rounds:
+    display_dir = round_dir / ("continuous_trials_" + timestamp())
+    save_continuous_trial_plot(continuous_trials, fitted_result, display_dir)
+    continuous_display_outputs[round_name] = display_dir
+    print(round_name, continuous_trials.trial_ids, continuous_trials.metadata["actual_bounds_seconds"], display_dir)
+    display(Image(filename=str(display_dir / "fourband_continuous_trials.png")))'''),
     ]
     notebook.metadata.kernelspec = {"display_name": "Python 3", "language": "python", "name": "python3"}
     notebook.metadata.language_info = {"name": "python"}
@@ -244,13 +285,79 @@ def update_review_cells(output):
     nbf.write(existing, output)
 
 
+def _owned_cell(notebook, cell_type, *markers):
+    matches = [i for i, cell in enumerate(notebook.cells)
+        if cell.cell_type == cell_type and all(marker in cell.source for marker in markers)]
+    if len(matches) != 1:
+        raise ValueError(f"Cannot uniquely identify owned notebook cell: {markers}. No file was changed.")
+    return matches[0]
+
+
+def _preserve_display_parameters(source, revised):
+    names = {"TRIAL_PAIR_IDS", "TRIAL_PRE_SECONDS", "TRIAL_POST_SECONDS", "TRIAL_DISPLAY_ROUND"}
+    originals = {}
+    lines = source.splitlines()
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id in names:
+                originals[node.targets[0].id] = "\n".join(lines[node.lineno - 1:node.end_lineno])
+    updated = revised.splitlines()
+    for node in reversed(ast.parse(revised).body):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name in originals:
+                updated[node.lineno - 1:node.end_lineno] = [originals[name]]
+    return "\n".join(updated)
+
+
+def update_continuous_cells(output):
+    """Migrate display and policy cells without touching user parameters."""
+    existing = nbf.read(output, as_version=4)
+    revised = build_notebook()
+    _owned_cell(existing, "code", "SUBJECT_ID =", "def extraction_settings():")
+    owners = {
+        0: ("markdown", "# 四频带联合 ECoG 分类"),
+        2: ("code", "PROJECT_DIR =", "from fourband.analysis import"),
+        9: ("markdown", "## 5."),
+        10: ("code", "pending_first = fit_joint("),
+        14: ("code", "selected_review = FourBandReviewWindow("),
+        15: ("markdown", "## 8."),
+        16: ("code", "if RUN_3D_RENDER", "render_electrode_clusters("),
+    }
+    # Identify source-owned cells before replacing anything; positional type
+    # checks cannot distinguish an inserted user analysis from pipeline code.
+    positions = {index: _owned_cell(existing, *markers) for index, markers in owners.items()}
+    continuous = [i for i, cell in enumerate(existing.cells) if cell.cell_type == "code"
+        and "TRIAL_PAIR_IDS =" in cell.source and "load_continuous_trials(" in cell.source]
+    if continuous:
+        code_index = _owned_cell(existing, "code", "TRIAL_PAIR_IDS =", "load_continuous_trials(")
+        markdown_index = _owned_cell(existing, "markdown", "## 9.", "双 trial")
+        display_source = _preserve_display_parameters(existing.cells[code_index].source, revised.cells[18].source)
+        existing.cells[markdown_index].source = revised.cells[17].source
+        existing.cells[code_index].source = display_source
+    else:
+        insert_at = positions[16] + 1
+        existing.cells[insert_at:insert_at] = revised.cells[17:]
+    for revised_index, existing_index in positions.items():
+        existing.cells[existing_index].source = revised.cells[revised_index].source
+    for cell in existing.cells:
+        if cell.cell_type == "code":
+            cell.outputs = []
+            cell.execution_count = None
+    nbf.validate(existing)
+    nbf.write(existing, output)
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--update-review", action="store_true")
+    parser.add_argument("--update-continuous", action="store_true")
     args = parser.parse_args()
     output = Path(__file__).with_name("ECoG_4band_clustering_pipeline.ipynb")
-    if args.update_review:
+    if args.update_continuous:
+        update_continuous_cells(output)
+    elif args.update_review:
         update_review_cells(output)
     else:
         nbf.write(build_notebook(), output)

@@ -107,7 +107,19 @@ def main():
                 assert np.isclose(budget, ns["BAND_WEIGHTS"][band])
                 assert (directory / f"{band}_audio_dynamics.png").stat().st_size > 1000
             assert not any(c.startswith("qc_") for c in fitted.feature_columns)
+            from fourband.analysis import ECOG_FEATURE_SUFFIXES
+            assert all(c.split("__", 1)[1] in ECOG_FEATURE_SUFFIXES for c in fitted.feature_columns)
             metrics["rounds"][name] = dict(summary, output=str(directory))
+        continuous = ns["continuous_trials"]
+        assert np.allclose(np.diff(continuous.times), 1 / ns["DISPLAY_SFREQ"], atol=1e-12)
+        assert continuous.metadata["gap_seconds"] >= 0
+        assert len(continuous.trial_ids) == 2
+        for name, directory in ns["continuous_display_outputs"].items():
+            assert (directory / "fourband_continuous_trials.png").stat().st_size > 1000
+            display_metadata = json.loads((directory / "continuous_trial_metadata.json").read_text())
+            assert display_metadata["trial_ids"] == list(continuous.trial_ids)
+        metrics["continuous"] = dict(continuous.metadata,
+            output={name: str(path) for name, path in ns["continuous_display_outputs"].items()})
         (output / "verification_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
         print(json.dumps(metrics, indent=2), flush=True)
         print("Notebook execution and numerical checks passed.", flush=True)

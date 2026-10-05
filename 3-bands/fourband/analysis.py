@@ -18,12 +18,29 @@ from clustering_pipeline import (
 DEFAULT_BANDS = {"theta": (4.0, 8.0), "beta1": (13.0, 24.0),
                  "beta2": (24.0, 40.0), "high_gamma": (70.0, 150.0)}
 
+# Exact suffixes keep unreviewed coupling descriptors out of both fitting rounds.
+ECOG_FEATURE_SUFFIXES = frozenset({
+    "early_mean", "middle_mean", "late_mean", "middle_minus_early", "late_minus_middle",
+    "positive_auc", "negative_auc", "positive_peak_value", "negative_peak_value",
+    "positive_peak_percent", "negative_peak_percent", "dominant_peak_width_percent",
+    "offset_rebound", "late_to_post_change", "energy_mean", "energy_std", "energy_auc",
+    "energy_peak_abs", "energy_peak_percent", "energy_range", "pre_mean", "post_mean",
+    "post_minus_pre_mean", "power_slope_mean", "power_slope_std", "power_slope_peak_abs",
+    "power_slope_peak_percent",
+    # ECoG-only descriptors from older onset/offset feature tables.
+    "early_delta", "late_delta", "post_delta", "post_std", "post_auc", "onset_slope",
+    "post_peak_abs", "post_peak_time", "articulation_mean", "offset_slope",
+    # Despite its legacy name, this correlates event duration with ECoG response.
+    "audio_dur_ecog_cov",
+})
+
 
 @dataclass
 class FourBandExtraction:
     features: pd.DataFrame
     epochs: dict
     bands: dict
+    filter_kwargs: dict | None = None
 
 
 def _validate_bands(bands, sfreq):
@@ -87,7 +104,8 @@ def extract_fourband(raw, events, audio, *, bands=None, smoothing_sigma_seconds=
         epochs_by_band[band] = epochs
     feature_table = pd.DataFrame(feature_table)
     feature_table["exclusion_reason"] = [";".join(parts) for parts in reasons]
-    return FourBandExtraction(feature_table, epochs_by_band, bands)
+    return FourBandExtraction(feature_table, epochs_by_band, bands,
+        filter_kwargs=dict(epoch_kwargs.get("filter_kwargs") or {}))
 
 
 def load_fourband(fif_path, onset_path, offset_path, wav_path, *, picks="ecog", **kwargs):
@@ -103,7 +121,11 @@ def load_fourband(fif_path, onset_path, offset_path, wav_path, *, picks="ecog", 
 
 def fit_joint(features, *, n_clusters=4, bands=None, band_weights=None,
               bad_mask=None, correlation_threshold=.95, random_state=50):
-    """Prune features within bands, then assign each band a fixed total distance budget."""
+    """Prune ECoG-only predictors within bands and assign fixed band distance budgets.
+
+    Audio diagnostics may remain in the input, including legacy feature tables,
+    but are excluded before redundancy selection or any estimator is fitted.
+    """
     bands = tuple(DEFAULT_BANDS if bands is None else bands)
     if len(bands) != 4 or len(set(bands)) != 4:
         raise ValueError("Four unique bands are required for joint fitting.")
@@ -120,9 +142,11 @@ def fit_joint(features, *, n_clusters=4, bands=None, band_weights=None,
         raise ValueError("Every band weight must be finite and positive.")
     selected, weights = [], {}
     for band in bands:
-        columns = [c for c in features if c.startswith(band + "__")]
+        prefix = band + "__"
+        columns = [c for c in features if c.startswith(prefix)
+                   and c.removeprefix(prefix) in ECOG_FEATURE_SUFFIXES]
         if not columns:
-            raise ValueError(f"No predictors for {band}; cannot fit a four-band model.")
+            raise ValueError(f"No ECoG predictors for {band}; cannot fit a four-band model.")
         table = features[["channel", "is_bad", *columns]].copy()
         try:
             keep = select_beta_progress_feature_columns(table, bad_mask=bad_mask,
