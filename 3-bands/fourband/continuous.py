@@ -7,6 +7,8 @@ import json
 from numbers import Integral
 from pathlib import Path
 import pickle
+from functools import wraps
+from threading import RLock
 
 import numpy as np
 import pandas as pd
@@ -66,32 +68,45 @@ def _power_cache_key(raw, channels, bands, filter_kwargs):
     return digest.digest()
 
 
+def _cache_locked(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return locked
+
+
 class ContinuousPowerCache:
     """Bounded session LRU of raw band power, before any baseline or display.
 
     Every lookup validates the full current signal. ``info()`` reports resident
     array bytes, hits/misses/evictions/fallbacks and the last fallback reason.
     ``clear()`` releases arrays and resets counters. Oversized requests use the
-    original band-at-a-time uncached path. Use from a single UI/session thread.
+    original band-at-a-time uncached path. Short metadata updates are locked so
+    UI clearing and background numerical jobs cannot corrupt LRU accounting.
     """
 
     def __init__(self, max_bytes=512 * 1024 ** 2):
         if isinstance(max_bytes, (bool, np.bool_)) or not isinstance(max_bytes, Integral) or max_bytes < 0:
             raise ValueError("max_bytes must be a nonnegative integer.")
         self.max_bytes = int(max_bytes)
+        self._lock = RLock()
         self.clear()
 
+    @_cache_locked
     def clear(self):
         self._entries = OrderedDict()
         self._bytes = 0
         self._hits = self._misses = self._evictions = self._fallbacks = 0
         self._status, self._reason = "empty", None
 
+    @_cache_locked
     def info(self):
         return dict(max_bytes=self.max_bytes, bytes=self._bytes, entries=len(self._entries),
                     hits=self._hits, misses=self._misses, evictions=self._evictions,
                     fallbacks=self._fallbacks, status=self._status, reason=self._reason)
 
+    @_cache_locked
     def _lookup(self, key):
         self._reason = None
         if key in self._entries:
@@ -103,12 +118,14 @@ class ContinuousPowerCache:
         self._status = "miss"
         return None
 
+    @_cache_locked
     def _fallback(self, required):
         self._misses += 1
         self._fallbacks += 1
         self._status = "fallback"
         self._reason = f"Raw power needs {required} bytes, exceeding cache limit {self.max_bytes}; computed uncached."
 
+    @_cache_locked
     def _store(self, key, power):
         size = sum(values.nbytes for values in power.values())
         if size > self.max_bytes:

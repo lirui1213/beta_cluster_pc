@@ -1,5 +1,7 @@
 """A display-only Tk explorer for real adjacent trials and cluster detail."""
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import numpy as np
 
@@ -7,6 +9,10 @@ from signal_processing import finite_mean
 from visualization import cluster_color
 from .continuous import adjacent_trial_pairs, prepare_continuous_trials
 from .tk_cleanup import dispose_tk_canvas
+
+
+# Serialize numerical jobs sharing a session power cache; never use Tk here.
+_CONTINUOUS_WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fourband-power")
 
 
 class ExplorerState:
@@ -70,11 +76,15 @@ class ExplorerState:
         self.band = band
 
     def continuous(self):
+        return self.continuous_request()()
+
+    def continuous_request(self):
+        """Snapshot display settings before handing pure computation to a worker."""
         kwargs = dict(trial_ids=self.trial_ids, pre_seconds=self.pre_seconds, post_seconds=self.post_seconds,
                       sigma_seconds=self.sigma_seconds, display_sfreq=self.display_sfreq)
         if self.cache is not None:
             kwargs["cache"] = self.cache
-        return prepare_continuous_trials(self.raw, self.events, self.audio, self.extraction, **kwargs)
+        return partial(prepare_continuous_trials, self.raw, self.events, self.audio, self.extraction, **kwargs)
 
 
 class FourBandExplorer:
@@ -85,6 +95,10 @@ class FourBandExplorer:
         self.closed = True
         self._drawing = False
         self._pending = None
+        self._generation = 0
+        self._future = None
+        self._render_valid = False
+        self._channel_pending = False
 
     def show(self, block=True):
         import tkinter as tk
@@ -156,11 +170,9 @@ class FourBandExplorer:
 
     def select_channel(self, channel):
         self.state.select_channel(channel)
-        if self.closed:
-            self.show(block=False)
-        else:
-            self._sync()
-            self._schedule_redraw()
+        # VTK pick callbacks must not enter Tcl; pump() consumes this request.
+        self._channel_pending = True
+        self._render_valid = False
 
     def _schedule_redraw(self):
         if not self.closed:
@@ -170,6 +182,9 @@ class FourBandExplorer:
 
     def _changed(self, key):
         try:
+            sigma = float(self.variables["sigma"].get())
+            if not np.isfinite(sigma) or sigma < 0:
+                raise ValueError("Sigma must be finite and nonnegative.")
             if key == "pair":
                 self.state.pair_index = self.pair_labels.index(self.variables[key].get())
             elif key == "channel":
@@ -180,42 +195,81 @@ class FourBandExplorer:
                 label = int(self.variables[key].get())
                 index = np.flatnonzero(self.state.result.labels == label)[0]
                 self.state.select_channel(self.state.result.channels[int(index)])
-            sigma = float(self.variables["sigma"].get())
-            if not np.isfinite(sigma) or sigma < 0:
-                raise ValueError("Sigma must be finite and nonnegative.")
             self.state.sigma_seconds = sigma
             self._sync()
             self.redraw()
         except (ValueError, IndexError) as error:
+            self._generation += 1
+            if self._future is not None:
+                self._future.cancel()
+                self._future = None
+            if self._pending is not None:
+                self.root.after_cancel(self._pending)
+                self._pending = None
+            self._render_valid = False
+            self._sync()
             self.variables["status"].set(str(error))
 
     def redraw(self):
+        if self._pending is not None:
+            self.root.after_cancel(self._pending)
         self._pending = None
         if self.closed or self._drawing:
             return
         self._drawing = True
         try:
+            self._generation += 1
+            self._render_valid = False
+            generation = self._generation
+            if self._future is not None:
+                self._future.cancel()
             self.variables["status"].set("Rendering...")
-            self.root.update_idletasks()
-            self.figure.clear()
             if self.variables["view"].get() == "Cluster detail":
+                self._future = None
+                self.figure.clear()
                 from .inspection import plot_inspection
                 plot_inspection(self.state.extraction, self.state.result, self.state.band,
                     channel=self.state.channel, label=self.state.label, sigma_seconds=self.state.sigma_seconds,
                     n_bootstrap=0, figure=self.figure)
             else:
-                self._draw_continuous()
+                self._future = _CONTINUOUS_WORKER.submit(self.state.continuous_request())
+                self._pending = self.root.after(25, partial(self._finish_continuous, generation, self._future))
+                return
             self.canvas.draw_idle()
-            cache_info = self.state.cache.info() if self.state.cache is not None else {"enabled": False}
-            self.variables["status"].set(f"Channel {self.state.channel} | Cluster {self.state.label} | "
-                f"Trials {self.state.trial_ids} | QC excluded: {self.state.excluded_trial_ids} | Cache {cache_info}")
+            self._render_valid = True
+            self._rendered_status()
         except Exception as error:
             self.variables["status"].set(f"Display unavailable: {error}")
         finally:
             self._drawing = False
 
-    def _draw_continuous(self):
-        data = self.state.continuous()
+    def _finish_continuous(self, generation, future):
+        if self.closed or generation != self._generation:
+            return
+        self._pending = None
+        if not future.done():
+            self._pending = self.root.after(25, partial(self._finish_continuous, generation, future))
+            return
+        self._future = None
+        self._drawing = True
+        try:
+            data = future.result()
+            self.figure.clear()
+            self._draw_continuous(data)
+            self.canvas.draw_idle()
+            self._render_valid = True
+            self._rendered_status()
+        except Exception as error:
+            self.variables["status"].set(f"Display unavailable: {error}")
+        finally:
+            self._drawing = False
+
+    def _rendered_status(self):
+        cache_info = self.state.cache.info() if self.state.cache is not None else {"enabled": False}
+        self.variables["status"].set(f"Channel {self.state.channel} | Cluster {self.state.label} | "
+            f"Trials {self.state.trial_ids} | QC excluded: {self.state.excluded_trial_ids} | Cache {cache_info}")
+
+    def _draw_continuous(self, data):
         axes = self.figure.subplots(2, 2, squeeze=False)
         channel_index = data.channels.index(self.state.channel)
         members = self.state.result.labels == self.state.label
@@ -246,6 +300,12 @@ class FourBandExplorer:
             + data.metadata["baseline_description"], fontsize=11)
 
     def save(self):
+        if self._future is not None:
+            self.variables["status"].set("Rendering...")
+            return
+        if not self._render_valid:
+            self.variables["status"].set("No completed plot for current settings.")
+            return
         if self.output_dir is None:
             self.variables["status"].set("No export directory configured.")
             return
@@ -267,6 +327,13 @@ class FourBandExplorer:
         self.variables["status"].set("Cache cleared.")
 
     def pump(self):
+        if self._channel_pending:
+            self._channel_pending = False
+            if self.closed:
+                self.show(block=False)
+            else:
+                self._sync()
+                self._schedule_redraw()
         if not self.closed:
             try:
                 self.root.update_idletasks()
@@ -278,6 +345,12 @@ class FourBandExplorer:
         if self.closed:
             return
         self.closed = True
+        self._channel_pending = False
+        self._render_valid = False
+        self._generation += 1
+        if self._future is not None:
+            self._future.cancel()
+            self._future = None
         if self._pending is not None:
             try:
                 self.root.after_cancel(self._pending)

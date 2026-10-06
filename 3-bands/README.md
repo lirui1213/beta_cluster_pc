@@ -121,7 +121,7 @@ TRIAL_QC_SETTINGS = {
 
 第 11 节 `OPEN_EXPLORER=True` 打开曲线窗口：前两个箭头切换相邻配对，后续菜单依次为配对、频带、类别、通道和视图；可选择 `Continuous` 或 `Cluster detail`。输入秒单位 sigma 后点击 Apply，Save 保存当前图和查看参数；关闭窗口可继续运行 Notebook。操作不改变类数、trial 剔除或标签。
 
-`LINK_SURFACE_EXPLORER=True` 时，脑表面窗口右键点选电极可更新其四频带曲线。点击脑表面或背景不会误选；按 CSV 实际通道名联动，类别可见性和编号开关仍有效。Tk 与 VTK 共享事件泵，不需要 Qt；关闭任一窗口后不会继续调用已关闭对象。
+`LINK_SURFACE_EXPLORER=True` 时，脑表面窗口右键点选电极可更新其四频带曲线。点击脑表面或背景不会误选；按 CSV 实际通道名联动，类别可见性和编号开关仍有效。主线程先处理 VTK 事件，再处理 Tk 事件，不在 VTK 的原生回调内部执行 `Tk.update()`；这避免了 Windows 下已复现的 `PyEval_RestoreThread` 致命错误。不需要 Qt；关闭任一窗口后不会继续调用已关闭对象。显式使用 `interactive_update=True` 的调用者须通过 `plotter.update()` 驱动联动窗口。
 
 原始连续曲线不会因分类剔除而删掉真实记录：被剔除的选定通道 trial 标成 QC，类别平均连续图标注该事件中剔除的成员数。它们是原始信号对照，不应误读为重新纳入分类。
 
@@ -132,3 +132,7 @@ TRIAL_QC_SETTINGS = {
 若 Jupyter 日志出现 `invalid command name "...idle_draw"`，表示已关闭的 Tk 画布仍有待执行回调。复审和查看窗口现在会在销毁前取消 Matplotlib 绘图/事件循环回调，并先解绑 GUI 画布；两轮静态 PNG 导出独立使用 Agg 画布，即使默认后端为 TkAgg 也不创建额外 Tk 窗口。原有人工复审、PyVista 和曲线弹窗保留。
 
 更新后先重启 Notebook 内核，再从初始化、参数、提取和 trial 确认顺序运行，避免沿用旧窗口对象。此修复不改变特征、手动 K、权重或分类标签；其他类型的内核崩溃仍需根据其 Jupyter 日志判断原因。
+
+连续曲线查看和脑表面联动窗口的全记录滤波、功率及平滑计算在单个后台工作线程执行；Tk/Matplotlib 绘图和控件更新仍只在主线程进行。计算期间显示 `Rendering...`，窗口继续响应，不再等待整段四频带计算才打开。切换显示参数或关闭窗口后，旧任务的结果不会回写；已开始的数值任务会自行结束。缓存记账更新有锁保护，不会在后台任务提交缓存时被 Clear cache 打断。
+
+复现实际参数和既有人工选择可使用 `scripts/reproduce_fourband_kernel.py`，结果另存于 `outputs/verification/kernel_reproduction/`；不改写用户 Notebook。`--inprocess` 在指定环境中按单元顺序执行，保留真实 Tk/VTK 窗口，但并非 Jupyter 内核测试。诊断工具不启用周期性底层栈转储：该环境中它本身已触发访问冲突，不能把此类诊断崩溃误判为绘图故障。

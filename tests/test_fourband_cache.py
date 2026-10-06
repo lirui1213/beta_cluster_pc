@@ -3,6 +3,8 @@ import copy
 import importlib
 from pathlib import Path
 import sys
+import threading
+from collections import OrderedDict
 
 import numpy as np
 import pandas as pd
@@ -31,6 +33,37 @@ def filter_calls(monkeypatch):
 
     monkeypatch.setattr(mne.io.BaseRaw, "filter", counted)
     return calls
+
+
+def test_ui_clear_waits_for_atomic_worker_eviction(cache):
+    cache = type(cache)(max_bytes=8)
+    cache._store(b"old", {"theta": np.ones(1)})
+    evicting, release, cleared = threading.Event(), threading.Event(), threading.Event()
+
+    class BlockingEntries(OrderedDict):
+        def popitem(self, *args, **kwargs):
+            removed = super().popitem(*args, **kwargs)
+            evicting.set()
+            release.wait(2)
+            return removed
+
+    cache._entries = BlockingEntries(cache._entries)
+    worker = threading.Thread(target=lambda: cache._store(b"new", {"theta": np.ones(1)}))
+    def clear():
+        cache.clear()
+        cleared.set()
+    clearer = threading.Thread(target=clear)
+    worker.start()
+    try:
+        assert evicting.wait(1)
+        clearer.start()
+        assert not cleared.wait(.1), "UI clear must not interleave with worker LRU accounting."
+    finally:
+        release.set()
+        worker.join(3)
+        if clearer.ident is not None:
+            clearer.join(3)
+    assert cache.info()["bytes"] == cache.info()["entries"] == 0
 
 
 def prepare(recording, **kwargs):

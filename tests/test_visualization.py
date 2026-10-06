@@ -130,6 +130,114 @@ def test_show_pyvista_window_saves_screenshot_after_show(tmp_path):
     assert plotter.events == ["show", (str(screenshot_path), False)]
 
 
+def test_linked_surface_pumps_ui_outside_native_vtk_callbacks():
+    events = []
+    callbacks = {}
+
+    class Interactor:
+        def AddObserver(self, event, callback):
+            callbacks[event] = callback
+            return event
+        def RemoveObserver(self, event):
+            callbacks.pop(event, None)
+        def TerminateApp(self):
+            pass
+
+    class Plotter:
+        _closed = False
+        inside_native = False
+        def __init__(self):
+            self.iren = SimpleNamespace(interactor=Interactor(), process_events=self.native_events)
+        def reset_camera(self):
+            pass
+        def add_axes(self):
+            pass
+        def close(self):
+            self._closed = True
+        def show(self, **kwargs):
+            assert kwargs.get("interactive_update") is True, "Linked UI must not enter the blocking VTK Start loop."
+        def update(self, **kwargs):
+            self.native_events()
+            self.render()
+        def render(self):
+            assert "ExitEvent" in callbacks, "Never render after native ExitEvent finalized the window."
+        def native_events(self):
+            self.inside_native = True
+            events.append("vtk")
+            if events.count("vtk") == 3:
+                callbacks["ExitEvent"](self.iren.interactor, "ExitEvent")
+            self.inside_native = False
+
+    plotter = Plotter()
+    def pump():
+        assert not plotter.inside_native
+        events.append("tk")
+    pv = SimpleNamespace(global_theme=SimpleNamespace(notebook=True), set_jupyter_backend=lambda _: None)
+    show_pyvista_window(plotter, pv_module=pv, on_window_tick=pump)
+    assert events[0:2] == ["vtk", "tk"]
+    assert events.count("vtk") == 3 and events[-1] == "vtk"
+
+
+def test_linked_native_close_drops_invalid_window_before_cached_screenshot(tmp_path):
+    events = []
+    class Window:
+        current = True
+        def IsCurrent(self):
+            return self.current
+    class Plotter:
+        _closed = False
+        def __init__(self):
+            self.render_window = Window()
+            interactor = SimpleNamespace(AddObserver=lambda *_: 1, RemoveObserver=lambda *_: None)
+            self.iren = SimpleNamespace(interactor=interactor, process_events=self.native_close)
+        def reset_camera(self):
+            pass
+        def add_axes(self):
+            pass
+        def show(self, **kwargs):
+            events.append("show")
+        def update(self, **kwargs):
+            raise AssertionError("Original update would render the destroyed window")
+        def native_close(self):
+            events.append("native_close")
+            self.render_window.current = False
+        def render(self):
+            raise AssertionError("Destroyed OpenGL window must not be rendered")
+        def _clear_ren_win(self):
+            events.append("drop_window")
+            self.render_window = None
+        def close(self):
+            events.append("close")
+            self._closed = True
+        def screenshot(self, *args, **kwargs):
+            assert self._closed and self.render_window is None
+            events.append("cached_screenshot")
+    pv = SimpleNamespace(global_theme=SimpleNamespace(notebook=True), set_jupyter_backend=lambda _: None)
+    show_pyvista_window(Plotter(), pv_module=pv, on_window_tick=lambda: None,
+                       screenshot=tmp_path / "brain.png")
+    assert events == ["show", "native_close", "drop_window", "close", "cached_screenshot"]
+
+
+def test_failed_nonblocking_show_restores_original_update():
+    class Plotter:
+        def reset_camera(self):
+            pass
+        def add_axes(self):
+            pass
+        def close(self):
+            pass
+        def update(self, **kwargs):
+            pass
+        def show(self, **kwargs):
+            raise RuntimeError("native initialization failed")
+    plotter = Plotter()
+    original = plotter.update
+    pv = SimpleNamespace(global_theme=SimpleNamespace(notebook=True), set_jupyter_backend=lambda _: None)
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        show_pyvista_window(plotter, pv_module=pv, interactive_update=True, on_window_tick=lambda: None)
+    assert plotter.update == original
+
+
 def test_render_electrode_clusters_forwards_display_style(monkeypatch, tmp_path):
     class FakeCloud:
         def __init__(self, coordinates):

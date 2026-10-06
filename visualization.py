@@ -6,7 +6,7 @@ import warnings
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
@@ -952,6 +952,54 @@ class _SurfaceWindowTick:
         self.iren = None
 
 
+class _SurfaceWindowPump:
+    """Service the linked UI after, never inside, VTK's native callbacks."""
+
+    def __init__(self, plotter, callback, *, capture=False):
+        if not callable(callback):
+            raise TypeError("on_window_tick must be callable or None.")
+        self.plotter, self.callback = plotter, callback
+        self.original_update = plotter.update
+        self.active = True
+        self.last_tick = float("-inf")
+        self.capture = capture
+        self.last_capture = float("-inf")
+        plotter.update = self.update
+        _on_plotter_close(plotter, self.disconnect)
+
+    def update(self, *args, **kwargs):
+        process_events = getattr(getattr(self.plotter, "iren", None), "process_events", None)
+        if callable(process_events):
+            process_events()
+            result = None
+            window = getattr(self.plotter, "render_window", None)
+            if window is not None and not window.IsCurrent():
+                self.disconnect()
+                self.plotter._clear_ren_win()
+                self.plotter.close()
+        else:
+            result = self.original_update(*args, **kwargs)
+        now = monotonic()
+        if self.active and now - self.last_tick >= .04:
+            self.last_tick = now
+            try:
+                if callable(process_events):
+                    self.plotter.render()
+                if self.capture and now - self.last_capture >= .2:
+                    self.plotter.last_image = self.plotter.screenshot(None, return_img=True)
+                    self.last_capture = now
+                self.callback()
+            except Exception as exc:
+                self.disconnect()
+                warnings.warn(f"Surface linked-window pump failed and was disconnected: {exc}")
+        return result
+
+    def disconnect(self):
+        self.active = False
+        self.callback = None
+        self.plotter.update = self.original_update
+
+
 class _SurfaceChannelPicking:
     def __init__(self, plotter, actor_channels, callback):
         if not callable(callback):
@@ -1007,9 +1055,11 @@ def show_pyvista_window(
     interactive_update: bool = False,
     on_window_tick: Any = None,
 ) -> Any:
-    """Open a native window; optionally pump a linked UI every 50 ms.
+    """Open a native window; optionally pump a linked UI every 40 ms.
 
-    ``on_window_tick`` runs inside VTK's event loop without a nested Tk mainloop.
+    Linked UIs run after native event processing, avoiding nested Tk/VTK
+    callbacks that can abort CPython on Windows. The caller still blocks until
+    the desktop window exits unless ``interactive_update=True`` is requested.
     For ``interactive_update=True``, callers must drive ``plotter.update()``.
     The default remains a blocking desktop window.
     """
@@ -1034,24 +1084,46 @@ def show_pyvista_window(
         except Exception:
             pass
 
-    ticking = None if on_window_tick is None else _SurfaceWindowTick(plotter, on_window_tick)
+    pumping = None
+    ticking = None
+    if on_window_tick is not None:
+        if callable(getattr(plotter, "update", None)):
+            pumping = _SurfaceWindowPump(plotter, on_window_tick, capture=screenshot is not None)
+        else:
+            ticking = _SurfaceWindowTick(plotter, on_window_tick)
     show_kwargs = dict(interactive=True, auto_close=False)
-    if interactive_update:
+    if interactive_update or pumping is not None:
         show_kwargs["interactive_update"] = True
+    shown = False
     try:
         try:
             result = plotter.show(notebook=False, **show_kwargs)
         except TypeError:
             # Current PyVista takes notebook at construction, not show().
             result = plotter.show(**show_kwargs)
+        shown = True
+        if pumping is not None and not interactive_update:
+            while pumping.active and not getattr(plotter, "_closed", False):
+                plotter.update(force_redraw=False)
+                sleep(.01)
     finally:
-        if ticking is not None and not interactive_update:
+        if ticking is not None and (not interactive_update or not shown):
             ticking.disconnect()
+        if pumping is not None and (not interactive_update or not shown):
+            pumping.disconnect()
+    # Native Win32 close destroys the OpenGL window independently of PyVista.
+    # Drop that handle before screenshot/cleanup, just as Plotter.show does.
+    window = getattr(plotter, "render_window", None)
+    if pumping is not None and window is not None and not window.IsCurrent():
+        plotter._clear_ren_win()
+        plotter.close()
     if screenshot is not None:
         try:
             plotter.screenshot(str(screenshot), return_img=False)
         except RuntimeError as exc:
             warnings.warn(f"PyVista window opened, but screenshot was not saved: {exc}")
+    if pumping is not None and not interactive_update and not getattr(plotter, "_closed", False):
+        plotter.close()
     return result
 
 

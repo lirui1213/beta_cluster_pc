@@ -45,3 +45,17 @@ def test_trial_flags_use_actual_ids_and_do_not_mask_raw_display(recording):
     assert state.excluded_trial_ids == (11,)
     data = state.continuous()
     assert np.isfinite(data.power["theta"][0]).all()
+
+
+def test_worker_request_snapshots_settings(recording, monkeypatch):
+    import fourband.explorer as module
+    raw, events, audio, extraction = recording
+    result = SimpleNamespace(channels=("E1", "E2"), labels=np.array([0, 1]))
+    state = module.ExplorerState(raw, events, audio, extraction, result, sigma_seconds=.10)
+    captured = {}
+    monkeypatch.setattr(module, "prepare_continuous_trials", lambda *args, **kwargs: captured.update(kwargs))
+    request = state.continuous_request()
+    state.sigma_seconds = .15
+    state.display_sfreq = 80
+    request()
+    assert captured["sigma_seconds"] == .10 and captured["display_sfreq"] == 100
