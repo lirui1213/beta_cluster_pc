@@ -6,6 +6,7 @@ import numpy as np
 from signal_processing import finite_mean
 from visualization import cluster_color
 from .continuous import adjacent_trial_pairs, prepare_continuous_trials
+from .tk_cleanup import dispose_tk_canvas
 
 
 class ExplorerState:
@@ -283,7 +284,7 @@ class FourBandExplorer:
             except Exception:
                 pass
             self._pending = None
-        self.figure.clear()
+        dispose_tk_canvas(self.canvas, self.figure)
         try:
             self.root.destroy()
         except Exception:

@@ -5,6 +5,7 @@ import numpy as np
 
 from .trial_qc import (TrialExclusions, _aligned, _source, _validated_pairs,
                        validate_trial_report)
+from .tk_cleanup import dispose_tk_canvas
 
 
 class TrialQualityReviewWindow:
@@ -146,14 +147,7 @@ class TrialQualityReviewWindow:
             variable.trace_remove("write", token)
         self._traces.clear()
         if hasattr(self, "canvas"):
-            widget = self.canvas.get_tk_widget()
-            for name in ("_idle_draw_id", "_event_loop_id"):
-                timer = getattr(self.canvas, name, None)
-                if timer is not None:
-                    widget.after_cancel(timer)
-                    setattr(self.canvas, name, None)
-            widget.destroy()
-            self.figure.clear()
+            dispose_tk_canvas(self.canvas, self.figure)
         if hasattr(self, "root"):
             self.root.grab_release()
             self.root.destroy()

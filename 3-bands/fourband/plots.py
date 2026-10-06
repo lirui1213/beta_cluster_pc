@@ -3,10 +3,17 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from matplotlib import pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 
 from signal_processing import finite_mean, gaussian_smooth_nan, curve_slope
 from visualization import _concat_beta_progress_display, cluster_color, plot_pca_clusters
+
+
+def _export_figure(figsize):
+    figure = Figure(figsize=figsize, layout="constrained")
+    FigureCanvasAgg(figure)
+    return figure
 
 
 def summarize_relationship(epochs, *, sigma_seconds=.10, slope_method="savgol"):
@@ -55,8 +62,8 @@ def save_round_plots(epochs_by_band, result, output_dir, *, sigma_seconds=.10,
     bands = tuple(epochs_by_band)
     if len(bands) != 4 or not len(labels):
         raise ValueError("Four bands and at least one included cluster are required for plotting.")
-    fig, axes = plt.subplots(len(labels), 4, figsize=(18, 2.9 * len(labels)), squeeze=False,
-                             constrained_layout=True)
+    fig = _export_figure((18, 2.9 * len(labels)))
+    axes = fig.subplots(len(labels), 4, squeeze=False)
     records = []
     for column, (band, epochs) in enumerate(epochs_by_band.items()):
         if epochs.channel_names != result.channels:
@@ -101,12 +108,14 @@ def save_round_plots(epochs_by_band, result, output_dir, *, sigma_seconds=.10,
                                     n_electrodes=int(count[i]), mean_audio=float(envelope[i])))
         _save_relationship_plot(epochs, band, result, output, sigma_seconds, slope_method)
     fig.savefig(output / "fourband_cluster_grid.png", dpi=150)
-    plt.close(fig)
+    fig.clear()
     summary = pd.DataFrame(records)
     summary.to_csv(output / "fourband_curve_summary.csv", index=False, encoding="utf-8-sig")
-    fig, _ = plot_pca_clusters(result.pca_scores, result.labels, channel_names=result.channels, annotate=False)
+    fig = _export_figure((8, 6))
+    plot_pca_clusters(result.pca_scores, result.labels, channel_names=result.channels,
+                      annotate=False, ax=fig.add_subplot(111, projection="3d"))
     fig.savefig(output / "pca_clusters.png", dpi=180, bbox_inches="tight")
-    plt.close(fig)
+    fig.clear()
     return summary
 
 
@@ -114,8 +123,8 @@ def _save_relationship_plot(epochs, band, result, output, sigma_seconds, slope_m
     cache = summarize_relationship(epochs, sigma_seconds=sigma_seconds, slope_method=slope_method)
     labels = np.unique(result.labels[result.clean_mask])
     progress = epochs.progress_percent
-    fig, axes = plt.subplots(len(labels), 3, figsize=(15, 3 * len(labels)), squeeze=False,
-                             constrained_layout=True)
+    fig = _export_figure((15, 3 * len(labels)))
+    axes = fig.subplots(len(labels), 3, squeeze=False)
     records = []
     for row, label in enumerate(labels):
         mask = result.labels == label
@@ -141,7 +150,7 @@ def _save_relationship_plot(epochs, band, result, output, sigma_seconds, slope_m
             records.append(dict(label=int(label), progress_percent=float(point), n_electrodes=int(mask.sum()),
                                 **{key: float(value[i]) for key, value in means.items()}))
     fig.savefig(output / f"{band}_audio_dynamics.png", dpi=150)
-    plt.close(fig)
+    fig.clear()
     pd.DataFrame(records).to_csv(output / f"{band}_audio_dynamics.csv", index=False, encoding="utf-8-sig")
     pd.DataFrame({"channel": result.channels, "label": result.labels,
                   "paired_trial_count": cache["valid_trial_count"]}).to_csv(

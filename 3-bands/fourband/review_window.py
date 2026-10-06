@@ -5,6 +5,7 @@ import re
 import numpy as np
 
 from .review import review_exclusion_audit
+from .tk_cleanup import dispose_tk_canvas
 
 
 @dataclass(frozen=True)
@@ -162,8 +163,6 @@ class FourBandReviewWindow:
         try:
             self.root.mainloop()
         finally:
-            from matplotlib import pyplot as plt
-            plt.close(self.figure)
             if not self._closed:
                 self.cancel()
         return self.selection
@@ -232,11 +231,12 @@ class FourBandReviewWindow:
     def cancel(self):
         if self._closed:
             return
+        self._closed = True
         if self._pending_preview is not None:
             self.root.after_cancel(self._pending_preview)
             self._pending_preview = None
         for variable, trace in self._variable_traces:
             variable.trace_remove("write", trace)
         self._variable_traces.clear()
+        dispose_tk_canvas(self.canvas, self.figure)
         self.root.destroy()
-        self._closed = True
