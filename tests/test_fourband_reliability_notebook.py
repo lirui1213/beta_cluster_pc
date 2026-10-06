@@ -80,6 +80,6 @@ def test_legacy_migration_cannot_strip_reliability_controls(tmp_path):
     assert "TRIAL_QC_READY" in code_with(nbformat.read(path, as_version=4), "pending_first = fit_joint(").source
 
 
-def test_disabled_surface_cell_needs_no_explorer_or_fitted_state():
+def test_disabled_surface_cell_needs_no_launcher_or_fitted_state():
     source = code_with(generator().build_reliability_notebook(), "if RUN_3D_RENDER").source
     exec(source, dict(RUN_3D_RENDER=False, RUN_SELECTABLE_CLUSTER_RENDER=False, SECOND_ROUND_READY=False))

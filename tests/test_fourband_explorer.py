@@ -59,3 +59,24 @@ def test_worker_request_snapshots_settings(recording, monkeypatch):
     state.display_sfreq = 80
     request()
     assert captured["sigma_seconds"] == .10 and captured["display_sfreq"] == 100
+
+
+def test_numeric_process_submitter_gets_only_display_settings(recording):
+    from concurrent.futures import Future
+    from fourband.explorer import FourBandExplorer
+    raw, events, audio, extraction = recording
+    result = SimpleNamespace(channels=("E1", "E2"), labels=np.array([0, 1]))
+    captured = []
+    cleared = []
+    def submit(settings):
+        captured.append(settings)
+        return Future()
+    popup = FourBandExplorer(raw, events, audio, extraction, result,
+        continuous_submitter=submit, cache_clearer=lambda: cleared.append(True))
+    job = popup._submit_continuous()
+    assert isinstance(job, Future)
+    assert captured == [dict(trial_ids=(10, 11), pre_seconds=1., post_seconds=1., sigma_seconds=.10, display_sfreq=100.)]
+    assert not any(key in captured[0] for key in ("raw", "cache", "extraction"))
+    popup.variables = {"status": SimpleNamespace(set=lambda value: None)}
+    popup.clear_cache()
+    assert cleared == [True]

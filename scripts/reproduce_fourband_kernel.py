@@ -126,61 +126,8 @@ TrialQualityReviewWindow.show = _show_qc
 FourBandReviewWindow.show = _show_review
 print("REPRODUCTION: native popup confirmation uses", len(_pairs), "saved channel-trial selections", flush=True)
 '''
-    surface_hook = '''
-import time, pyvista as pv
-_native_show = pv.Plotter.show
-_surface_count = 0
-def _timed_show(plotter, *args, **kwargs):
-    global _surface_count
-    _surface_count += 1
-    number = _surface_count
-    plotter.iren.initialize()
-    iren = plotter.iren
-    started = time.monotonic()
-    ticks = [0]
-    closing = [False]
-    errors = []
-    def probe(caller, event):
-        if closing[0]:
-            return
-        ticks[0] += 1
-        if ticks[0] == 1:
-            print("SURFACE", number, "first native timer event", flush=True)
-        explorer = globals().get("surface_explorer")
-        pending = explorer is not None and explorer._future is not None
-        if pending and ticks[0] == 5:
-            print("SURFACE", number, "native event loop responsive during background computation", flush=True)
-        if time.monotonic() - started >= 180:
-            errors.append("Linked explorer did not finish within 180 seconds")
-            pending = False
-        if time.monotonic() - started >= 4 and not pending:
-            closing[0] = True
-            if NATIVE_CLOSE:
-                print("SURFACE", number, "finalizing native OpenGL window before ExitEvent", flush=True)
-                plotter.render_window.Finalize()
-            print("SURFACE", number, "requesting native ExitEvent", flush=True)
-            caller.InvokeEvent("ExitEvent")
-    observer = iren.add_observer("TimerEvent", probe)
-    timer = iren.create_timer(50, repeating=True)
-    succeeded = False
-    def cleanup():
-        iren.destroy_timer(timer)
-        iren.remove_observer(observer)
-    try:
-        result = _native_show(plotter, *args, **kwargs)
-        succeeded = True
-        print("SURFACE", number, "show returned, ticks=", ticks[0], flush=True)
-        if errors:
-            raise RuntimeError(errors[0])
-        return result
-    finally:
-        if succeeded and kwargs.get("interactive_update", False):
-            from visualization import _on_plotter_close
-            _on_plotter_close(plotter, cleanup)
-        else:
-            cleanup()
-pv.Plotter.show = _timed_show
-'''
+    surface_hook = "from fourband import display_process\n" + "display_process._WORKER_SCRIPT=Path(" + repr(
+        str(project / "tests/fourband_display_native_probe.py")) + ")\n"
     report("Artifacts: " + str(output))
     namespace = {}
     try:
@@ -244,11 +191,12 @@ pv.Plotter.show = _timed_show
                             "RendererAgg.draw_text = _trace_text", "trace native text drawing")
             execute(source, "cell " + str(number))
             if number == 10:
-                execute("if surface_explorer is not None:\n"
-                        "    assert surface_explorer._future is None\n"
-                        "    assert 'unavailable' not in surface_explorer.variables['status'].get().lower()\n"
-                        "    surface_explorer.figure.savefig(ROUND2_DIR / 'verified_explorer.png')\n"
-                        "    print('EXPLORER RENDER VERIFIED', surface_explorer.variables['status'].get())",
+                execute("if globals().get('surface_display_run') is not None:\n"
+                        "    evidence=json.loads((surface_display_run.directory / 'native_verification.json').read_text())\n"
+                        "    assert len(evidence['surfaces']) == 2 and evidence['curve_draws'] >= 2\n"
+                        "    assert evidence['picks']\n"
+                        "    assert all(pid != evidence['worker_pid'] for pid in evidence['numerical_pids'])\n"
+                        "    print('ISOLATED EXPLORER RENDER VERIFIED', evidence)",
                         "verify linked curves completed")
             if number == 2:
                 execute("OUTPUT_ROOT=Path(" + repr(str(output)) + ")", "redirect verification output only")

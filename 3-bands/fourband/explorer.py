@@ -80,16 +80,23 @@ class ExplorerState:
 
     def continuous_request(self):
         """Snapshot display settings before handing pure computation to a worker."""
-        kwargs = dict(trial_ids=self.trial_ids, pre_seconds=self.pre_seconds, post_seconds=self.post_seconds,
-                      sigma_seconds=self.sigma_seconds, display_sfreq=self.display_sfreq)
+        kwargs = self.continuous_settings()
         if self.cache is not None:
             kwargs["cache"] = self.cache
         return partial(prepare_continuous_trials, self.raw, self.events, self.audio, self.extraction, **kwargs)
 
+    def continuous_settings(self):
+        return dict(trial_ids=self.trial_ids, pre_seconds=self.pre_seconds, post_seconds=self.post_seconds,
+                    sigma_seconds=self.sigma_seconds, display_sfreq=self.display_sfreq)
+
 
 class FourBandExplorer:
-    def __init__(self, raw, events, audio, extraction, result, *, output_dir=None, **settings):
+    def __init__(self, raw, events, audio, extraction, result, *, output_dir=None,
+                 continuous_submitter=None, cache_clearer=None, **settings):
         self.state = ExplorerState(raw, events, audio, extraction, result, **settings)
+        self._continuous_submitter = continuous_submitter
+        self._cache_clearer = cache_clearer
+        self._worker_cache_info = None
         self.output_dir = Path(output_dir) if output_dir is not None else None
         self.root = None
         self.closed = True
@@ -232,7 +239,7 @@ class FourBandExplorer:
                     channel=self.state.channel, label=self.state.label, sigma_seconds=self.state.sigma_seconds,
                     n_bootstrap=0, figure=self.figure)
             else:
-                self._future = _CONTINUOUS_WORKER.submit(self.state.continuous_request())
+                self._future = self._submit_continuous()
                 self._pending = self.root.after(25, partial(self._finish_continuous, generation, self._future))
                 return
             self.canvas.draw_idle()
@@ -242,6 +249,11 @@ class FourBandExplorer:
             self.variables["status"].set(f"Display unavailable: {error}")
         finally:
             self._drawing = False
+
+    def _submit_continuous(self):
+        if self._continuous_submitter is not None:
+            return self._continuous_submitter(self.state.continuous_settings())
+        return _CONTINUOUS_WORKER.submit(self.state.continuous_request())
 
     def _finish_continuous(self, generation, future):
         if self.closed or generation != self._generation:
@@ -254,6 +266,7 @@ class FourBandExplorer:
         self._drawing = True
         try:
             data = future.result()
+            self._worker_cache_info = data.metadata.get("power_cache")
             self.figure.clear()
             self._draw_continuous(data)
             self.canvas.draw_idle()
@@ -265,7 +278,9 @@ class FourBandExplorer:
             self._drawing = False
 
     def _rendered_status(self):
-        cache_info = self.state.cache.info() if self.state.cache is not None else {"enabled": False}
+        cache_info = self._worker_cache_info
+        if cache_info is None:
+            cache_info = self.state.cache.info() if self.state.cache is not None else {"enabled": False}
         self.variables["status"].set(f"Channel {self.state.channel} | Cluster {self.state.label} | "
             f"Trials {self.state.trial_ids} | QC excluded: {self.state.excluded_trial_ids} | Cache {cache_info}")
 
@@ -322,6 +337,9 @@ class FourBandExplorer:
         self.variables["status"].set(str(path))
 
     def clear_cache(self):
+        if self._cache_clearer is not None:
+            self._cache_clearer()
+            self._worker_cache_info = {"status": "clear queued"}
         if self.state.cache is not None:
             self.state.cache.clear()
         self.variables["status"].set("Cache cleared.")

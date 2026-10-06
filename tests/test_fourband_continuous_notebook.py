@@ -40,7 +40,12 @@ def test_targeted_update_preserves_existing_analysis_and_style_assignments(tmp_p
     assert "ensure_extraction_config" in continuous_cell.source
     assert "SECOND_ROUND_READY" in continuous_cell.source
     assert "load_continuous_trials" in revised.cells[2].source
-    assert any("channel_label_toggle=True" in c.source for c in revised.cells)
+    from test_fourband_display_notebook import cell_source, display_namespace
+    namespace, calls, _ = display_namespace(tmp_path)
+    exec(cell_source(revised, "if RUN_3D_RENDER"), namespace)
+    assert len(calls) == 1
+    assert calls[0]["surface_options"]["channel_label_toggle"] is True
+    assert calls[0]["show_surface"] is calls[0]["show_selectable"] is True
     assert any("predictor_policy" in c.source for c in revised.cells)
     nbformat.validate(revised)
     for cell in revised.cells:
@@ -51,12 +56,16 @@ def test_targeted_update_preserves_existing_analysis_and_style_assignments(tmp_p
     assert [cell.source for cell in twice.cells] == [cell.source for cell in revised.cells]
 
 
-def test_generated_notebook_has_same_continuous_workflow_and_label_controls():
+def test_generated_notebook_has_same_continuous_workflow_and_label_controls(tmp_path):
     notebook = generator().build_notebook()
     assert len(notebook.cells) == 19
     assert "adjacent_trial_pairs" in notebook.cells[18].source
     assert "save_continuous_trial_plot" in notebook.cells[18].source
-    assert "channel_label_toggle=True" in notebook.cells[16].source
+    from test_fourband_display_notebook import display_namespace
+    namespace, calls, _ = display_namespace(tmp_path)
+    exec(notebook.cells[16].source, namespace)
+    assert len(calls) == 1
+    assert calls[0]["surface_options"]["channel_label_toggle"] is True
 
 
 def test_cancelled_second_round_cannot_display_old_second_labels():

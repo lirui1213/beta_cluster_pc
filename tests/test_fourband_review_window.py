@@ -123,11 +123,20 @@ def test_notebook_only_fits_and_exports_after_accepted_popup(tmp_path, accepted,
         assert "ROUND2_DIR" not in ns
 
 
-def test_notebook_defaults_to_popup_and_anatomy_is_gated_on_completed_second_round():
+def test_notebook_defaults_to_popup_and_anatomy_is_gated_on_completed_second_round(tmp_path):
+    from test_fourband_display_notebook import display_namespace
     sources = ["".join(c["source"]) for c in notebook_cells() if c["cell_type"] == "code"]
     assert any("OPEN_REVIEW_WINDOW = True" in s for s in sources)
-    assert any("RUN_3D_RENDER and SECOND_ROUND_READY" in s for s in sources)
-    assert any("RUN_SELECTABLE_CLUSTER_RENDER and SECOND_ROUND_READY" in s for s in sources)
+    surface = next(source for source in sources if "if RUN_3D_RENDER" in source)
+    namespace, calls, _ = display_namespace(tmp_path)
+    result = namespace.pop("second_result")
+    namespace["SECOND_ROUND_READY"] = False
+    exec(surface, namespace)
+    assert not calls
+    namespace.update(SECOND_ROUND_READY=True, second_result=result)
+    exec(surface, namespace)
+    assert len(calls) == 1
+    assert calls[0]["show_surface"] and calls[0]["show_selectable"]
 
 
 def test_notebook_guard_failure_invalidates_old_round_two_ready_flag():

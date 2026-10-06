@@ -41,7 +41,7 @@ from fourband.review_window import FourBandReviewWindow, ReviewSettings
 from fourband.workflow import save_extraction, save_round, ensure_extraction_config, ensure_first_round
 from fourband.continuous import adjacent_trial_pairs, load_continuous_trials, save_continuous_trial_plot
 from audio_cross_3band_utils import load_speech_events
-from visualization import render_electrode_clusters, render_selectable_electrode_class
+from fourband.display_process import run_display
 SECOND_ROUND_READY = False
 pd.set_option("display.max_columns", 24)
 def timestamp():
@@ -211,16 +211,20 @@ else:
         display(Image(filename=str(ROUND2_DIR / f"{band}_audio_dynamics.png")))
     print(ROUND2_DIR)'''),
         m("## 8. 可选脑表面显示\n\n使用第二轮联合标签，绘图参数不影响分类。窗口的 Channel labels 开关显示或隐藏实际通道名，选择类别时编号随可见电极切换。"),
-        c('''if RUN_3D_RENDER and SECOND_ROUND_READY:
-    render_electrode_clusters(ELECTRODE_CSV, dict(zip(second_result.channels, map(int, second_result.labels))),
-        subjects_dir=SUBJECTS_DIR, subject=SURFACE_SUBJECT, reference_mri=REFERENCE_MRI,
-        hemispheres=HEMISPHERES, brain_color=SURFACE_COLOR, brain_opacity=SURFACE_OPACITY,
-        channel_label_toggle=True, screenshot=ROUND2_DIR / "joint_electrode_clusters.png")
-if RUN_SELECTABLE_CLUSTER_RENDER and SECOND_ROUND_READY:
-    render_selectable_electrode_class(ELECTRODE_CSV, dict(zip(second_result.channels, map(int, second_result.labels))),
-        subjects_dir=SUBJECTS_DIR, subject=SURFACE_SUBJECT, reference_mri=REFERENCE_MRI,
-        hemispheres=HEMISPHERES, brain_color=SURFACE_COLOR, brain_opacity=SURFACE_OPACITY,
-        channel_label_toggle=True)'''),
+        c('''if RUN_3D_RENDER or RUN_SELECTABLE_CLUSTER_RENDER:
+    if SECOND_ROUND_READY:
+        surface_display_run = run_display(extraction, second_result, output_dir=ROUND2_DIR,
+            fif_path=FIF_PATH, onset_path=ONSET_PATH, offset_path=OFFSET_PATH, wav_path=WAV_PATH,
+            surface_options=dict(electrode_csv=ELECTRODE_CSV, subjects_dir=SUBJECTS_DIR,
+                subject=SURFACE_SUBJECT, reference_mri=REFERENCE_MRI, hemispheres=HEMISPHERES,
+                brain_color=SURFACE_COLOR, brain_opacity=SURFACE_OPACITY, channel_label_toggle=True),
+            show_surface=RUN_3D_RENDER, show_selectable=RUN_SELECTABLE_CLUSTER_RENDER,
+            link_explorer=globals().get("LINK_SURFACE_EXPLORER", True),
+            explorer_settings=dict(pre_seconds=globals().get("TRIAL_PRE_SECONDS", 1.0),
+                post_seconds=globals().get("TRIAL_POST_SECONDS", 1.0),
+                sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, display_sfreq=DISPLAY_SFREQ,
+                trial_ids=globals().get("TRIAL_PAIR_IDS", None)),
+            cache_max_mb=globals().get("CACHE_MAX_MB", 512))'''),
         m("## 9. 相邻双 trial 连续显示\n\n横轴为相对第一次 onset 的真实秒数，完整保留两个 trial 及中间间隔。原始 trial 编号从 0 开始，不是筛选后的行号；从下方相邻配对表选取。音频包络保留，分类不使用音频。pre_onset 模式的整幅连续图统一使用第一个 trial 的基线；SEM 表示电极间差异，不是两个 trial 的置信区间。重跑本节不会重新分类。"),
         c('''TRIAL_PAIR_IDS = None  # None: first available pair; or (original_id_1, original_id_2)
 TRIAL_PRE_SECONDS = 1.0
@@ -264,25 +268,36 @@ def update_review_cells(output):
     if any("WEIGHT_PRESET =" in cell.source for cell in existing.cells):
         return update_reliability_cells(output)
     revised = build_notebook()
+    owners = {
+        2: ("code", "PROJECT_DIR =", "from fourband.analysis import"),
+        11: ("markdown", "## 6.", "PCA"),
+        12: ("code", "pca_review_table("),
+        13: ("markdown", "## 7."),
+        14: ("code", "refit_reviewed("),
+        16: ("code", "if RUN_3D_RENDER"),
+    }
+    # Resolve every owner before editing sources, including the surface cell.
+    positions = {index: _owned_cell(existing, *markers) for index, markers in owners.items()}
     for index in (11, 12, 13, 14):
-        if existing.cells[index].cell_type != revised.cells[index].cell_type:
-            raise ValueError("Notebook layout changed; review cells require a targeted manual update.")
-        existing.cells[index].source = revised.cells[index].source
-        if existing.cells[index].cell_type == "code":
-            existing.cells[index].outputs = []
-            existing.cells[index].execution_count = None
-    initialization = existing.cells[2]
+        cell = existing.cells[positions[index]]
+        cell.source = revised.cells[index].source
+        if cell.cell_type == "code":
+            cell.outputs = []
+            cell.execution_count = None
+    initialization = existing.cells[positions[2]]
     initialization.source = initialization.source.replace(
         "from visualization import BadChannelReviewWindow, render_electrode_clusters, render_selectable_electrode_class",
-        "from visualization import render_electrode_clusters, render_selectable_electrode_class")
+        "from fourband.display_process import run_display").replace(
+        "from visualization import render_electrode_clusters, render_selectable_electrode_class",
+        "from fourband.display_process import run_display")
+    if "from fourband.display_process import run_display" not in initialization.source:
+        initialization.source += "\nfrom fourband.display_process import run_display"
     import_line = "from fourband.review_window import FourBandReviewWindow, ReviewSettings"
     if import_line not in initialization.source:
         initialization.source = initialization.source.replace(
             "from fourband.review import pca_review_table, refit_reviewed",
             "from fourband.review import pca_review_table, refit_reviewed\n" + import_line)
-    existing.cells[16].source = existing.cells[16].source.replace(
-        "if RUN_3D_RENDER:", "if RUN_3D_RENDER and SECOND_ROUND_READY:").replace(
-        "if RUN_SELECTABLE_CLUSTER_RENDER:", "if RUN_SELECTABLE_CLUSTER_RENDER and SECOND_ROUND_READY:")
+    existing.cells[positions[16]].source = revised.cells[16].source
     nbf.validate(existing)
     nbf.write(existing, output)
 
@@ -326,7 +341,7 @@ def update_continuous_cells(output):
         10: ("code", "pending_first = fit_joint("),
         14: ("code", "selected_review = FourBandReviewWindow("),
         15: ("markdown", "## 8."),
-        16: ("code", "if RUN_3D_RENDER", "render_electrode_clusters("),
+        16: ("code", "if RUN_3D_RENDER"),
     }
     # Identify source-owned cells before replacing anything; positional type
     # checks cannot distinguish an inserted user analysis from pipeline code.
@@ -360,11 +375,10 @@ def build_reliability_notebook():
 from fourband.trial_qc import detect_trial_quality, apply_trial_exclusions, TrialExclusions
 from fourband.trial_review_window import TrialQualityReviewWindow
 from fourband.continuous import ContinuousPowerCache
-from fourband.explorer import FourBandExplorer
 from fourband.inspection import save_inspection
 from fourband.stability import save_stability
 from fourband.session import ensure_fit_settings, ensure_trial_review, close_explorers, run_stability
-from audio_cross_3band_utils import load_ecog_fif, extract_audio_envelope
+from audio_cross_3band_utils import load_ecog_fif
 TRIAL_QC_READY = False
 EXPLORERS = {}
 '''
@@ -384,23 +398,7 @@ POWER_CACHE = ContinuousPowerCache(max_bytes=int(CACHE_MAX_MB * 1024**2))
 def fit_settings():
     return dict(bands=dict(BANDS), band_weights=dict(BAND_WEIGHTS),
         correlation_threshold=FEATURE_CORRELATION_THRESHOLD, random_state=RANDOM_STATE,
-        weight_preset=WEIGHT_PRESET, group_weights=dict(GROUP_WEIGHTS) if WEIGHT_PRESET == "custom" else None)
-
-def get_explorer(round_name, fitted_result, output_dir):
-    existing = EXPLORERS.get(round_name)
-    if existing is not None and existing.state.result is fitted_result and existing.state.extraction is extraction:
-        existing.state.cache = POWER_CACHE
-        return existing
-    if existing is not None:
-        existing.close()
-    explorer = FourBandExplorer(qc_raw, load_speech_events(ONSET_PATH, OFFSET_PATH),
-        extract_audio_envelope(WAV_PATH), extraction, fitted_result, cache=POWER_CACHE,
-        pre_seconds=globals().get("TRIAL_PRE_SECONDS", 1.0),
-        post_seconds=globals().get("TRIAL_POST_SECONDS", 1.0),
-        sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, display_sfreq=DISPLAY_SFREQ,
-        output_dir=output_dir / "explorer")
-    EXPLORERS[round_name] = explorer
-    return explorer''')
+        weight_preset=WEIGHT_PRESET, group_weights=dict(GROUP_WEIGHTS) if WEIGHT_PRESET == "custom" else None)''')
     extraction_cell = notebook.cells[8]
     extraction_cell.source = "TRIAL_QC_READY = False\nSECOND_ROUND_READY = False\nclose_explorers(EXPLORERS)\n" + extraction_cell.source
     extraction_cell.source += "\nUNREVIEWED_EXTRACTION = extraction\n"
@@ -453,18 +451,14 @@ else:
         "random_state=RANDOM_STATE, weight_preset=WEIGHT_PRESET,\n        group_weights=GROUP_WEIGHTS if WEIGHT_PRESET == 'custom' else None)", 1)
     second.source = second.source.replace("round_config=dict(round=2,", "round_config=dict(weight_preset=WEIGHT_PRESET, group_weights=GROUP_WEIGHTS if WEIGHT_PRESET == 'custom' else None, round=2,")
     surface = notebook.cells[16]
-    surface.source = '''if RUN_3D_RENDER or RUN_SELECTABLE_CLUSTER_RENDER:
+    surface.source = surface.source.replace("if RUN_3D_RENDER or RUN_SELECTABLE_CLUSTER_RENDER:", '''if RUN_3D_RENDER or RUN_SELECTABLE_CLUSTER_RENDER:
     if not TRIAL_QC_READY:
         raise ValueError("Confirm trial QC and refit before surface display.")
     ensure_extraction_config(extraction_settings(), extracted_settings)
     ensure_first_round(globals().get("first_extraction"), extraction)
-    ensure_fit_settings(fit_settings(), first_fit_settings)
-surface_explorer = None
-if SECOND_ROUND_READY and LINK_SURFACE_EXPLORER and (RUN_3D_RENDER or RUN_SELECTABLE_CLUSTER_RENDER):
-    surface_explorer = get_explorer("second", second_result, ROUND2_DIR)
-    surface_explorer.show(block=False)
-''' + surface.source
-    surface.source = surface.source.replace("channel_label_toggle=True", "on_channel_pick=surface_explorer.select_channel if surface_explorer is not None else None,\n        on_window_tick=surface_explorer.pump if surface_explorer is not None else None,\n        channel_label_toggle=True")
+    ensure_fit_settings(fit_settings(), first_fit_settings)''', 1)
+    surface.source = surface.source.replace('globals().get("LINK_SURFACE_EXPLORER", True)', "LINK_SURFACE_EXPLORER").replace(
+        'globals().get("CACHE_MAX_MB", 512)', "CACHE_MAX_MB")
     continuous = notebook.cells[18]
     continuous.source = continuous.source.replace("ensure_extraction_config(extraction_settings(), extracted_settings)",
         "if not TRIAL_QC_READY:\n    raise ValueError('Confirm trial QC and refit before display.')\nensure_fit_settings(fit_settings(), first_fit_settings)\nensure_extraction_config(extraction_settings(), extracted_settings)")
@@ -498,10 +492,15 @@ ensure_fit_settings(fit_settings(), first_fit_settings)
 if not TRIAL_QC_READY:
     raise ValueError("Confirm trial QC and refit before exploration.")
 if OPEN_EXPLORER:
-    explorer_round = "second" if SECOND_ROUND_READY else "first"
     fitted_result = second_result if SECOND_ROUND_READY else first_result
     explorer_dir = ROUND2_DIR if SECOND_ROUND_READY else ROUND1_DIR
-    get_explorer(explorer_round, fitted_result, explorer_dir).show(block=True)''')
+    explorer_display_run = run_display(extraction, fitted_result, output_dir=explorer_dir,
+        fif_path=FIF_PATH, onset_path=ONSET_PATH, offset_path=OFFSET_PATH, wav_path=WAV_PATH,
+        explorer_settings=dict(pre_seconds=globals().get("TRIAL_PRE_SECONDS", 1.0),
+            post_seconds=globals().get("TRIAL_POST_SECONDS", 1.0),
+            sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, display_sfreq=DISPLAY_SFREQ,
+            trial_ids=globals().get("TRIAL_PAIR_IDS", None)),
+        cache_max_mb=CACHE_MAX_MB, explorer_only=True)''')
     notebook.cells[9:9] = [nbf.v4.new_markdown_cell("## 4.1 Trial 质量人工复审\n\n候选伪迹默认只标记，不自动剔除。勾选通道 × 原始 trial 编号并确认后，四频带共同剔除对应响应。取消不会应用待选项；有效 trial 太少的电极仍按已有质量规则排除并报告。"), qc]
     notebook.cells[5:5] = [nbf.v4.new_markdown_cell("## 2.1 可靠性与查看参数\n\n默认 legacy 保持原权重；可改 balanced、morphology、amplitude 或 custom。修改分类权重后重跑第一轮及第二轮。质量阈值只生成候选项，剔除仍须人工确认。"), settings]
     notebook.cells.extend([nbf.v4.new_markdown_cell("## 10. 稳定性与同类细节\n\n按已经拟合的 K 做分半及 trial 重采样，不自动选 K，也不因支持次数少而阻止分类。细线/电极热图反映同类内部差异；trial 热图保留原编号。试次重采样置信带以固定电极和标签为条件，不代表显著性或分类可信概率。"), diagnostics,
@@ -544,7 +543,7 @@ def update_reliability_cells(output):
     _owned_cell(existing, "code", "SUBJECT_ID =", "def extraction_settings():")
     markers = [("PROJECT_DIR =", "from fourband.analysis import"),
         ("pending_settings = extraction_settings()",), ("pending_first = fit_joint(",),
-        ("selected_review = FourBandReviewWindow(",), ("if RUN_3D_RENDER", "render_electrode_clusters("),
+        ("selected_review = FourBandReviewWindow(",), ("if RUN_3D_RENDER",),
         ("TRIAL_PAIR_IDS =", "load_continuous_trials(")]
     positions = [(_owned_cell(existing, "code", *m), _owned_cell(revised, "code", *m)) for m in markers]
     for old_index, new_index in positions:
@@ -553,7 +552,7 @@ def update_reliability_cells(output):
             source = _preserve_display_parameters(existing.cells[old_index].source, source)
         existing.cells[old_index].source = source
     additional = [("WEIGHT_PRESET =", "def fit_settings():"), ("selected_trial_pairs =", "TrialQualityReviewWindow("),
-        ("diagnostic_rounds =", "run_stability("), ("if OPEN_EXPLORER:", "show(block=True)")]
+        ("diagnostic_rounds =", "run_stability("), ("if OPEN_EXPLORER:",)]
     setting_names = {"WEIGHT_PRESET", "GROUP_WEIGHTS", "OPEN_TRIAL_QC_WINDOW", "TRIAL_QC_SETTINGS", "RUN_STABILITY",
         "STABILITY_RESAMPLES", "STABILITY_PROGRESS_WINDOW", "INSPECTION_BOOTSTRAP_DRAWS", "OPEN_EXPLORER",
         "LINK_SURFACE_EXPLORER", "CACHE_MAX_MB"}
