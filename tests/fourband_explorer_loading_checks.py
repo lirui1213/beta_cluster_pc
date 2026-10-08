@@ -92,4 +92,3 @@ def test_loading_failure_shows_error_instead_of_perpetual_computation():
         assert not popup._render_valid and popup._future is None
     finally:
         popup.close()
-
