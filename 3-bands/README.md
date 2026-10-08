@@ -147,4 +147,8 @@ TRIAL_QC_SETTINGS = {
 
 连续曲线查看和脑表面联动窗口通过独立数值进程执行全记录滤波、功率及平滑计算，不再在 Tk/VTK 显示进程内运行 SciPy 后台数值线程。Tk/Matplotlib 绘图和控件更新仍只在显示进程的主线程进行。计算期间显示 `Rendering...`，窗口继续响应；计算结果返回显示进程后才绘图。切换显示参数或关闭窗口后，旧任务的结果不会回写。连续功率缓存由数值进程持有，同一显示会话内保留，Clear cache 请求也转发到该进程处理。
 
+首次连续功率计算可能需要约一分钟，具体取决于记录长度和电脑性能。等待时会先显示四个频带的坐标区、`Computing continuous power` 和已等待秒数，不会绘制虚构曲线；完成后自动替换为真实曲线。状态及错误栏保留在控件下方，不再被可扩展画布挤出窗口。同一项计算尚未完成时切换电极、类别或频带会共用该任务，避免反复提交整段记录计算；更改配对或 sigma 仍会产生新任务。本次显示修复只需关闭旧弹窗后重跑显示 Cell，无需重新提取或聚类。
+
+`scripts/verify_isolated_fourband_display.py --request <可信本地 request.joblib 路径>` 可重放现有显示快照，结果另存于验证目录。诊断不仅检查导出文件，也检查实际 Tk 画布像素；`--explorer-only` 可单独验证曲线窗口。
+
 复现实际参数和既有人工选择可使用 `scripts/reproduce_fourband_kernel.py`，结果另存于 `outputs/verification/kernel_reproduction/`；不改写用户 Notebook。`--inprocess` 在指定环境中按单元顺序执行，保留真实 Tk/VTK 窗口，但并非 Jupyter 内核测试。诊断工具不启用周期性底层栈转储：该环境中它本身已触发访问冲突，不能把此类诊断崩溃误判为绘图故障。

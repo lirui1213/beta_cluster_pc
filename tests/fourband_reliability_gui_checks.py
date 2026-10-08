@@ -97,7 +97,8 @@ def test_worker_result_is_ignored_after_navigation_or_close(monkeypatch):
         old_future.set_result(old_request())
         popup._finish_continuous(old_generation, old_future)
         assert popup.variables["status"].get() == "Rendering..."
-        assert not popup.figure.axes
+        assert len(popup.figure.axes) == 4
+        assert all(not axis.lines for axis in popup.figure.axes)
         request, future = jobs[1]
         future.set_result(request())
         wait_for_render(popup)

@@ -2,6 +2,7 @@
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from time import monotonic
 
 import numpy as np
 
@@ -104,6 +105,10 @@ class FourBandExplorer:
         self._pending = None
         self._generation = 0
         self._future = None
+        self._future_settings = None
+        self._loading_started = None
+        self._loading_texts = []
+        self._loading_elapsed = None
         self._render_valid = False
         self._channel_pending = False
 
@@ -152,9 +157,12 @@ class FourBandExplorer:
         ttk.Button(tools, text="Clear cache", command=self.clear_cache).pack(side="left", padx=4)
         self.figure = Figure(figsize=(12, 7), layout="constrained")
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.root)
+        # Reserve status and toolbar space before allocating the expanding canvas.
+        ttk.Label(self.root, textvariable=self.variables["status"], anchor="w",
+                  wraplength=850).pack(fill="x", padx=8, pady=4)
+        toolbar = NavigationToolbar2Tk(self.canvas, self.root, pack_toolbar=False)
+        toolbar.pack(side="bottom", fill="x")
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
-        NavigationToolbar2Tk(self.canvas, self.root)
-        ttk.Label(self.root, textvariable=self.variables["status"], anchor="w").pack(fill="x", padx=8, pady=4)
         self._sync()
         self.redraw()
         if block:
@@ -228,10 +236,10 @@ class FourBandExplorer:
             self._generation += 1
             self._render_valid = False
             generation = self._generation
-            if self._future is not None:
-                self._future.cancel()
             self.variables["status"].set("Rendering...")
             if self.variables["view"].get() == "Cluster detail":
+                if self._future is not None:
+                    self._future.cancel()
                 self._future = None
                 self.figure.clear()
                 from .inspection import plot_inspection
@@ -239,7 +247,18 @@ class FourBandExplorer:
                     channel=self.state.channel, label=self.state.label, sigma_seconds=self.state.sigma_seconds,
                     n_bootstrap=0, figure=self.figure)
             else:
-                self._future = self._submit_continuous()
+                settings = self.state.continuous_settings()
+                reuse = (self._future is not None and not self._future.done()
+                         and settings == self._future_settings)
+                if not reuse:
+                    if self._future is not None:
+                        self._future.cancel()
+                    self._future = None
+                    self._future_settings = settings
+                    self._loading_started = monotonic()
+                self._draw_loading()
+                if not reuse:
+                    self._future = self._submit_continuous()
                 self._pending = self.root.after(25, partial(self._finish_continuous, generation, self._future))
                 return
             self.canvas.draw_idle()
@@ -247,6 +266,7 @@ class FourBandExplorer:
             self._rendered_status()
         except Exception as error:
             self.variables["status"].set(f"Display unavailable: {error}")
+            self._loading_error(error)
         finally:
             self._drawing = False
 
@@ -255,11 +275,38 @@ class FourBandExplorer:
             return self._continuous_submitter(self.state.continuous_settings())
         return _CONTINUOUS_WORKER.submit(self.state.continuous_request())
 
+    def _draw_loading(self):
+        self.figure.clear()
+        axes = self.figure.subplots(2, 2, squeeze=False)
+        self._loading_texts = []
+        for axis, band in zip(axes.flat, self.state.extraction.bands):
+            axis.set(title=band, xlabel="Real time from first onset (s)", ylabel="Power Z")
+            self._loading_texts.append(axis.text(.5, .5, "", transform=axis.transAxes,
+                ha="center", va="center", color="#555555", fontsize=11))
+        self.figure.suptitle(f"{self.state.channel} | Cluster {self.state.label} | Trials {self.state.trial_ids}")
+        self._loading_elapsed = None
+        self._update_loading()
+
+    def _update_loading(self):
+        elapsed = int(monotonic() - self._loading_started)
+        if elapsed != self._loading_elapsed:
+            self._loading_elapsed = elapsed
+            for text in self._loading_texts:
+                text.set_text(f"Computing continuous power\nElapsed: {elapsed} s")
+            self.canvas.draw_idle()
+
+    def _loading_error(self, error):
+        if self.variables["view"].get() == "Continuous":
+            for text in self._loading_texts:
+                text.set_text("Display unavailable")
+            self.canvas.draw_idle()
+
     def _finish_continuous(self, generation, future):
         if self.closed or generation != self._generation:
             return
         self._pending = None
         if not future.done():
+            self._update_loading()
             self._pending = self.root.after(25, partial(self._finish_continuous, generation, future))
             return
         self._future = None
@@ -267,6 +314,7 @@ class FourBandExplorer:
         try:
             data = future.result()
             self._worker_cache_info = data.metadata.get("power_cache")
+            self._loading_texts = []
             self.figure.clear()
             self._draw_continuous(data)
             self.canvas.draw_idle()
@@ -274,6 +322,7 @@ class FourBandExplorer:
             self._rendered_status()
         except Exception as error:
             self.variables["status"].set(f"Display unavailable: {error}")
+            self._loading_error(error)
         finally:
             self._drawing = False
 

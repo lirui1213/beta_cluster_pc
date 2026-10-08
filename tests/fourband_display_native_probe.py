@@ -19,6 +19,7 @@ from fourband import display_worker as worker
 
 directory = Path(sys.argv[1]).resolve().parent
 report = {"worker_pid": os.getpid(), "surfaces": [], "picks": [], "curve_draws": 0, "numerical_pids": []}
+probe_started = time.monotonic()
 explorers = []
 native_show = visualization.show_pyvista_window
 native_init = worker.FourBandExplorer.__init__
@@ -34,9 +35,23 @@ def remember(self, *args, **kwargs):
 
 def drawn(self, data):
     native_draw(self, data)
+    if report["curve_draws"] == 0:
+        report["first_curve_seconds"] = time.monotonic() - probe_started
     report["curve_draws"] += 1
     report["numerical_pids"].append(data.metadata["numerical_pid"])
-    self.figure.savefig(directory / "verified_explorer.png")
+
+
+def verify_canvas(explorer):
+    photo = explorer.canvas._tkphoto
+    width, height = photo.width(), photo.height()
+    pixels = [photo.get(x, y) for x in range(0, width, max(1, width // 40))
+              for y in range(0, height, max(1, height // 30))]
+    nonwhite = sum(min(pixel) < 230 for pixel in pixels)
+    if nonwhite < 10:
+        return False
+    report["canvas_nonwhite_samples"] = nonwhite
+    explorer.figure.savefig(directory / "verified_explorer.png")
+    return True
 
 
 def picked(self, channel):
@@ -46,13 +61,16 @@ def picked(self, channel):
 
 def explorer_show(self, block=True):
     if not block:
-        return native_explorer_show(self, block=False)
+        result = native_explorer_show(self, block=False)
+        capture_loading(self)
+        return result
     native_explorer_show(self, block=False)
+    capture_loading(self)
     started = time.monotonic()
     selected = [False]
     errors = []
     def check():
-        if self._render_valid and self._future is None:
+        if self._render_valid and self._future is None and verify_canvas(self):
             if not selected[0]:
                 selected[0] = True
                 self.variables["channel"].set(self.state.result.channels[1])
@@ -74,6 +92,15 @@ def explorer_show(self, block=True):
         self.close()
     if errors:
         raise RuntimeError(errors[0])
+
+
+def capture_loading(explorer):
+    if not explorer._render_valid and "loading_axes" not in report:
+        report["loading_axes"] = len(explorer.figure.axes)
+        explorer.canvas._tkphoto.write(str(directory / "loading_canvas.png"), format="png")
+        import tkinter.ttk as ttk
+        status = next(w for w in explorer.root.winfo_children() if isinstance(w, ttk.Label))
+        report["status_visible"] = status.winfo_y() + status.winfo_height() <= explorer.root.winfo_height()
 
 
 def probed_show(plotter, **kwargs):
@@ -118,7 +145,8 @@ def probed_show(plotter, **kwargs):
                 representation = widget.GetRepresentation()
                 representation.SetState(1)
                 widget.InvokeEvent("StateChangedEvent")
-        ready = explorer is None or (explorer._future is None and explorer._render_valid)
+        ready = explorer is None or (explorer._future is None and explorer._render_valid
+                                     and verify_canvas(explorer))
         if time.monotonic() - started > 180:
             errors.append("Native explorer did not finish in 180 seconds")
             ready = True

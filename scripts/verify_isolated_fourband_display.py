@@ -15,10 +15,30 @@ from fourband import display_process
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--model", type=Path)
+    parser.add_argument("--request", type=Path)
     parser.add_argument("--explorer-only", action="store_true")
     args = parser.parse_args()
+    if args.request:
+        request = joblib.load(args.request)
+        extraction, result = request.pop("extraction"), request.pop("result")
+        request.pop("output_dir")
+        sources = request.pop("sources")
+        if args.explorer_only:
+            request.update(explorer_only=True, show_surface=False, show_selectable=False)
+        labels = result.labels.copy()
+        output = ROOT / "3-bands/outputs/verification/isolated_display" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        display_process._WORKER_SCRIPT = ROOT / "tests/fourband_display_native_probe.py"
+        run = display_process.run_display(extraction, result, output_dir=output, **sources, **request)
+        evidence = json.loads((run.directory / "native_verification.json").read_text(encoding="utf-8"))
+        assert evidence["curve_draws"] >= 2 and evidence["canvas_nonwhite_samples"] >= 10
+        np.testing.assert_array_equal(labels, result.labels)
+        print("Saved request replay passed with nonblank native Tk canvas; labels unchanged.")
+        print(run.directory)
+        return
+    if args.checkpoint is None or args.model is None:
+        parser.error("Provide --request or both --checkpoint and --model.")
     extraction = joblib.load(args.checkpoint)["extraction"]
     result = joblib.load(args.model)
     labels = result.labels.copy()
