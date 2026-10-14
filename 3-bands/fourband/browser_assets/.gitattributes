@@ -1,0 +1,2 @@
+# Preserve the verified vendor bytes on Windows checkouts.
+vendor/** -text

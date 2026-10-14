@@ -28,7 +28,10 @@ def test_targeted_update_preserves_existing_analysis_and_style_assignments(tmp_p
     generator().update_continuous_cells(destination)
     revised = nbformat.read(destination, as_version=4)
     assert revised.cells[4].source == original_parameters
-    assert all(not cell.outputs and cell.execution_count is None for cell in revised.cells if cell.cell_type == "code")
+    for old, new in zip(notebook.cells, revised.cells):
+        if old.cell_type == "code":
+            assert new.outputs == old.outputs
+            assert new.execution_count == old.execution_count
     added = 0 if any(c.cell_type == "code" and "TRIAL_PAIR_IDS =" in c.source for c in notebook.cells) else 2
     assert len(revised.cells) == len(notebook.cells) + added
     assert revised.cells[-1].source == "user_notes = 'keep me'"

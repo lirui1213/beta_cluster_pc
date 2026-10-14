@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Four-band explorer</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+    <script defer src="vendor/plotly.js-dist-min/plotly.min.js"></script>
+    <script defer src="vendor/lucide/lucide.min.js"></script>
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="identity">
+        <i data-lucide="activity" aria-hidden="true"></i>
+        <div>
+          <h1>Four-band explorer</h1>
+          <p id="session-name">Connecting to session</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button
+          id="clear-cache"
+          title="Clear display cache"
+          aria-label="Clear display cache"
+          disabled
+        >
+          <i data-lucide="database-backup"></i>
+        </button>
+        <button
+          id="export"
+          title="Export PNGs and display settings"
+          aria-label="Export PNGs and display settings"
+          disabled
+        >
+          <i data-lucide="download"></i>
+        </button>
+        <span class="separator"></span>
+        <button
+          id="close-session"
+          title="Close session"
+          aria-label="Close session"
+        >
+          <i data-lucide="power"></i>
+        </button>
+      </div>
+    </header>
+    <main>
+      <div class="controls" id="controls">
+        <fieldset class="control-group pair-group">
+          <legend>Original trial pair</legend>
+          <div class="inline">
+            <button
+              id="previous-pair"
+              aria-label="Previous trial pair"
+              title="Previous trial pair"
+              disabled
+            >
+              <i data-lucide="chevron-left"></i></button
+            ><select
+              id="pair"
+              aria-label="Original trial pair"
+              disabled
+            ></select
+            ><button
+              id="next-pair"
+              aria-label="Next trial pair"
+              title="Next trial pair"
+              disabled
+            >
+              <i data-lucide="chevron-right"></i>
+            </button>
+          </div>
+        </fieldset>
+        <label class="control-group"
+          >Class<select
+            id="class-filter"
+            disabled
+            aria-label="Class visibility"
+          ></select
+        ></label>
+        <label class="control-group channel-group"
+          >Channel<select id="channel" disabled></select
+        ></label>
+        <fieldset class="control-group curve-control">
+          <legend>View</legend>
+          <div class="segmented">
+            <button id="view-continuous" aria-pressed="true" disabled>
+              Continuous</button
+            ><button id="view-detail" aria-pressed="false" disabled>
+              Class detail
+            </button>
+          </div>
+        </fieldset>
+        <label class="control-group curve-control detail-control" hidden
+          >Band<select id="detail-band"></select
+        ></label>
+        <fieldset class="control-group curve-control sigma-group">
+          <legend>Smoothing (s)</legend>
+          <div class="inline">
+            <input
+              id="sigma"
+              type="number"
+              min="0"
+              max="10"
+              step="0.01"
+              value="0.05"
+              aria-label="Display smoothing in seconds"
+              disabled
+            /><button
+              id="apply-sigma"
+              aria-label="Apply smoothing"
+              title="Apply smoothing"
+              disabled
+            >
+              <i data-lucide="check"></i>
+            </button>
+          </div>
+        </fieldset>
+      </div>
+      <div class="appearance">
+        <label class="swatch-label"
+          >Class
+          <input
+            id="class-color"
+            type="color"
+            value="#167d91"
+            title="Selected class color"
+            aria-label="Selected class color"
+            disabled
+        /></label>
+        <span class="separator brain-control"></span>
+        <label class="swatch-label brain-control"
+          >Cortex
+          <input
+            id="brain-color"
+            type="color"
+            value="#c8ccd0"
+            aria-label="Cortex color"
+            disabled
+        /></label>
+        <label class="range-label brain-control"
+          >Opacity
+          <input
+            id="brain-opacity"
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value="0.65"
+            disabled
+          /><output id="opacity-value">0.65</output></label
+        >
+        <label class="range-label brain-control"
+          >Size
+          <input
+            id="point-size"
+            type="range"
+            min="2"
+            max="30"
+            step="1"
+            value="14"
+            disabled
+          /><output id="size-value">14</output></label
+        >
+        <label class="check-label brain-control"
+          ><input
+            id="electrodes"
+            type="checkbox"
+            checked
+            disabled
+          />Electrodes</label
+        >
+        <label class="check-label brain-control"
+          ><input id="labels" type="checkbox" disabled />Labels</label
+        >
+        <span class="appearance-spacer"></span>
+        <label class="check-label curve-control"
+          ><input
+            id="show-selected"
+            type="checkbox"
+            checked
+            disabled
+          />Channel</label
+        >
+        <label class="check-label curve-control"
+          ><input id="show-mean" type="checkbox" checked disabled />Class
+          mean</label
+        >
+        <label class="check-label curve-control"
+          ><input
+            id="show-audio"
+            type="checkbox"
+            checked
+            disabled
+          />Audio</label
+        >
+      </div>
+      <div class="status-strip" role="status" aria-live="polite">
+        <span id="status-dot" class="status-dot busy"></span
+        ><span id="status-text">Loading session metadata</span
+        ><span id="elapsed">0.0 s</span><span id="pair-description"></span
+        ><button
+          id="retry"
+          hidden
+          title="Retry display request"
+          aria-label="Retry display request"
+        >
+          <i data-lucide="refresh-cw"></i>
+        </button>
+      </div>
+      <div id="notice" class="notice" role="status" hidden></div>
+      <div id="warnings" class="warnings" hidden></div>
+      <div class="workspace" id="workspace">
+        <section
+          class="brain-pane"
+          id="brain-pane"
+          aria-label="Brain and electrodes"
+        >
+          <div class="pane-heading">
+            <div>
+              <h2>Anatomy</h2>
+              <span id="anatomy-caption">Surface geometry</span>
+            </div>
+            <div class="pane-actions">
+              <button
+                id="reset-camera"
+                title="Reset camera"
+                aria-label="Reset camera"
+                disabled
+              >
+                <i data-lucide="rotate-ccw"></i>
+              </button>
+            </div>
+          </div>
+          <div id="brain">
+            <div
+              id="brain-error"
+              class="pane-message"
+              role="alert"
+              hidden
+            ></div>
+            <div id="brain-loading" class="pane-message">Loading anatomy</div>
+            <div id="electrode-labels"></div>
+          </div>
+          <div class="brain-footer">
+            <span class="selection-dot" id="selection-dot"></span
+            ><strong id="selection-name">No channel selected</strong
+            ><span id="selection-class"></span><span id="mapped-count"></span>
+          </div>
+        </section>
+        <section
+          class="curves-pane"
+          id="curves-pane"
+          aria-label="Four frequency bands"
+        >
+          <div class="pane-heading">
+            <div>
+              <h2 id="curves-heading">Continuous response</h2>
+              <span id="baseline">Awaiting data</span>
+            </div>
+            <div class="plot-legend">
+              <span><b class="line-channel"></b>Channel</span
+              ><span><b class="line-mean"></b>Class mean</span
+              ><span><b class="line-audio"></b>Audio</span
+              ><span><b class="qc-marker"></b>QC excluded</span>
+            </div>
+          </div>
+          <div id="plots" class="plots" aria-busy="true"></div>
+          <div id="curves-empty" class="curve-message">
+            Waiting for continuous data
+          </div>
+          <div id="detail" class="detail" hidden>
+            <img
+              id="detail-image"
+              alt="Class detail summary and duration-normalized heatmaps"
+              hidden
+            />
+          </div>
+          <div class="curves-footer">
+            <span id="curve-caption">Seconds relative to first trial onset</span
+            ><span id="data-channel"></span>
+          </div>
+        </section>
+      </div>
+    </main>
+    <noscript
+      ><p class="notice">
+        JavaScript is required to display this local session.
+      </p></noscript
+    >
+  </body>
+</html>

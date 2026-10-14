@@ -1,0 +1,40 @@
+{
+  "runtime_network": "All runtime dependencies are local to the token-scoped session root.",
+  "dependencies": [
+    {
+      "name": "three",
+      "version": "0.170.0",
+      "license": "MIT",
+      "source": "https://registry.npmjs.org/three/-/three-0.170.0.tgz",
+      "integrity": "sha512-FQK+LEpYc0fBD+J8g6oSEyyNzjp+Q7Ks1C568WWaoMRLW+TkNNWmenWeGgJjV105Gd+p/2ql1ZcjYvNiPZBhuQ==",
+      "files": {
+        "vendor/three/three.module.min.js": "sha256-08fd7545d13d2c7fb65ab691530a802dafefd638596501854f267d0fb13c39e7",
+        "vendor/three/OrbitControls.js": "sha256-e9c4f26866d39a36c8c9e8215e7d2a90a8a0b50ea6d44a005906e3d1fc726b8f",
+        "vendor/three/LICENSE": "sha256-4c40a1ef62450b857c3b2aaf294936304cd552d965fbcd9d32d4c5bcf4ba4454"
+      },
+      "adaptation": "Only OrbitControls.js import specifier changed from 'three' to './three.module.min.js' for offline CSP-compatible browser modules."
+    },
+    {
+      "name": "plotly.js-dist-min",
+      "version": "2.35.2",
+      "license": "MIT",
+      "source": "https://registry.npmjs.org/plotly.js-dist-min/-/plotly.js-dist-min-2.35.2.tgz",
+      "integrity": "sha512-oWDTf2kYOmTtEw3epeeSBdfH/H3OSktF0suST9oI6fIgKfbyd4MT7TPh8+CVzdHYllYon24Q0HI1hZjOnLqk6g==",
+      "files": {
+        "vendor/plotly.js-dist-min/plotly.min.js": "sha256-6d21266ce1bd7d9e5ab4e115989c70c20de0382fd973a8f26ab58619eba4d603",
+        "vendor/plotly.js-dist-min/LICENSE": "sha256-67a26cf80f03ff388f26945dfc1f6caed1a0746ff43871190339b3aee49b94bb"
+      }
+    },
+    {
+      "name": "lucide",
+      "version": "0.468.0",
+      "license": "ISC",
+      "source": "https://registry.npmjs.org/lucide/-/lucide-0.468.0.tgz",
+      "integrity": "sha512-UFbgwji/ZnAV7iTTE4jujyTV7J95AILKyATDUrqOJrMcUGfXvGjw3c1mcuHZUX2oJfkrAGU9KoxkrLQk2jjtiA==",
+      "files": {
+        "vendor/lucide/lucide.min.js": "sha256-3411692820cb8d47543f69496aa25fd603a358f4498046f41c508a5a3342210e",
+        "vendor/lucide/LICENSE": "sha256-1e7290b35280a048667bbf0ebabac1c7fd52a75300e8b2946ac165715997f2bc"
+      }
+    }
+  ]
+}

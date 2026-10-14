@@ -124,3 +124,25 @@ def test_numerical_startup_error_is_retained(tmp_path, monkeypatch):
         session.submit({})
     with pytest.raises(RuntimeError, match="missing pythonw.exe"):
         session.raise_if_failed()
+
+
+def test_generic_display_task_uses_same_owned_pool(tmp_path):
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+    from fourband.display_computation import DisplayComputation
+    submitted = []
+    future = Future()
+    future.set_result(b"png")
+    session = DisplayComputation(tmp_path / "request.joblib")
+    session.pool = SimpleNamespace(submit=lambda *args: (submitted.append(args), future)[1])
+    assert session.submit_task(bytes, b"data") is future
+    assert submitted == [(bytes, b"data")]
+
+
+def test_idle_pool_failure_is_visible_before_user_abort(tmp_path):
+    from types import SimpleNamespace
+    from fourband.display_computation import DisplayComputation
+    session = DisplayComputation(tmp_path / "request.joblib")
+    session.pool = SimpleNamespace(_broken="Idle child exited")
+    with pytest.raises(RuntimeError, match="Idle child exited"):
+        session.raise_if_failed()

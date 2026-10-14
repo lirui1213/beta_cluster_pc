@@ -40,9 +40,9 @@
 
 音频关系导出表使用明确前缀：`feature_mean_curve` 为特征提取时平均曲线的关系（音频保留提取单位），`feature_trialwise` 为提取时 trial 级描述，`display_paired_trial_slope_product_mean` 为显示设置下先在同一 trial 内计算斜率乘积、再平均的量（音频按全局峰值归一化），与音频动态图一致。这些量不应直接互换；方法和单位记录于 `relationship_methods.json`。
 
-`RUN_3D_RENDER`、`RUN_SELECTABLE_CLUSTER_RENDER` 可开启原有 PyVista 脑表面及分类选择弹窗，使用第二轮联合标签。调整 `SURFACE_COLOR` / `SURFACE_OPACITY` 不改变分类。
+`DISPLAY_BACKEND="browser"` 为显示默认值。`RUN_3D_RENDER`、`RUN_SELECTABLE_CLUSTER_RENDER` 开启本地浏览器中的统一脑表面视图，使用第二轮联合标签；两项都开启也只使用一个脑视图。调整 `SURFACE_COLOR` / `SURFACE_OPACITY` 不改变分类。需要旧显示时显式设置 `DISPLAY_BACKEND="native"`，浏览器失败不会自动切换到旧窗口。
 
-脑表面左下角新增 `Channel labels` 开关，默认关闭，显示电极 CSV 中的实际通道名，不用行号代替通道号。选择类别时只显示当前可见电极的编号；切换编号不改变相机、颜色或分类。
+脑表面的 `Channel labels` 开关显示电极 CSV 中的实际通道名，不用行号代替通道号。选择类别时只显示当前可见电极的编号；切换编号不改变相机、颜色或分类。
 
 ## 真实连续双 trial
 
@@ -64,7 +64,7 @@
 & 'E:\anaconda\envs\ECoG_LR_v1\python.exe' 3-bands/verify_notebook.py --baseline-mode pre_onset --first-k 3 --second-k 2
 ```
 
-可选 `--subject`、`--block`、`--manual-bad 电极名`、`--distance-threshold 数值`、`--weight-preset balanced`、`--exclude-trial ECoG_1:0`、`--stability-resamples 5`；运行记录存放于 `outputs/verification/`。验证副本关闭弹窗，默认不剔除候选伪迹；`--exclude-trial` 是验证时明确指定的剔除，不是自动检测剔除。不要在已修改 Notebook 后直接运行 `create_notebook.py`，无参数会重新生成初始版本。使用 `--update-reliability` 迁移新功能，保留原参数、附加单元及新设置，清除旧输出；已有新版本调用旧迁移选项时也会保留可靠性功能。
+可选 `--subject`、`--block`、`--manual-bad 电极名`、`--distance-threshold 数值`、`--weight-preset balanced`、`--exclude-trial ECoG_1:0`、`--stability-resamples 5`；运行记录存放于 `outputs/verification/`。验证副本关闭弹窗，默认不剔除候选伪迹；`--exclude-trial` 是验证时明确指定的剔除，不是自动检测剔除。现有进程显示版 Notebook 使用 `python 3-bands/create_notebook.py --update-browser` 迁移浏览器设置，仅补充缺少的 backend 参数，保留用户参数、代码编辑、所有输出、执行计数、单元格顺序和元数据，也不会恢复已删除的空白单元格。重复迁移不会重复添加设置，已显式选择的 native 后端也保留。无参数运行时，文件存在则迁移，只有文件不存在才生成初始版本；旧 `--update-review`、`--update-continuous`、`--update-reliability` 入口仍可使用，已有进程显示版走相同的源码迁移路径。
 
 ## Trial 质量人工复审
 
@@ -119,36 +119,41 @@ TRIAL_QC_SETTINGS = {
 
 ## 交互查看与缓存
 
-第 11 节 `OPEN_EXPLORER=True` 打开曲线窗口：前两个箭头切换相邻配对，后续菜单依次为配对、频带、类别、通道和视图；可选择 `Continuous` 或 `Cluster detail`。输入秒单位 sigma 后点击 Apply，Save 保存当前图和查看参数；关闭窗口可继续运行 Notebook。操作不改变类数、trial 剔除或标签。
+第 8 节和第 11 节都把 `backend=DISPLAY_BACKEND` 传给 `fourband.display_process.run_display`。默认在系统浏览器打开本地会话，并在 Notebook 打印可重新打开的 URL。服务只监听 `127.0.0.1` 的随机空闲端口，URL 包含本次会话的随机访问令牌；Three.js、Plotly 和其他前端资源全部随项目本地提供，不使用 CDN，也不把患者数据上传到外部服务。
 
-`LINK_SURFACE_EXPLORER=True` 时，脑表面窗口右键点选电极可更新其四频带曲线。点击脑表面或背景不会误选；按 CSV 实际通道名联动，类别可见性和编号开关仍有效。不需要 Qt。脑表面、类别选择和曲线窗口由独立显示进程创建并管理，Notebook 内核只把提取结果、拟合模型、源文件路径和显示设置交给 `fourband.display_process.run_display`。显示进程另通过进程池启动独立数值进程执行曲线计算；源记录由显示会话内的子进程读取，连续功率缓存驻留在数值进程，分类与 trial 人工复审流程保留。启动器 API 不变。
+第 11 节 `OPEN_EXPLORER=True` 打开仅有曲线的浏览器视图（`explorer_only=True`）。相邻配对、上一对/下一对、类别、通道及 `Continuous` / `Cluster detail` 可在页面切换。第 8 节开启 `LINK_SURFACE_EXPLORER=True` 时，点击电极按实际通道名联动四频带曲线；关闭联动时只显示脑表面，不计算连续曲线。页面保留类别可见性、颜色、通道编号、脑表面外观和相机控制；秒单位 sigma 经 Apply 后应用，导出保存当前图和查看设置。
 
-此前将 VTK `process_events()` 和 Tk 更新依次安排在主线程的修复，在实际 Jupyter 中仍未解决 `PyEval_RestoreThread` 致命崩溃。随后实际独立 GUI 测试也复现了 GIL 崩溃：SciPy 后台数值线程与 VTK `process_events()` 在同一进程内并发，即使离开 Notebook 内核仍不安全。该次测试中父进程存活，并收到普通 Python 异常；仅隔离 GUI 保护了内核，但未消除显示进程自身的崩溃。
+刷新页面可以恢复同一会话，不重新拟合、不丢弃已有分类标签。**显示 Cell 在会话活动期间保持阻塞**：点击页面的 **Close Session** 停止服务和它拥有的数值子进程，随后返回 Notebook；中断 Cell 也会清理本次拥有的进程树。**只关闭浏览器标签页不会清理会话**，需重新打开打印的 URL 后点击 Close Session，或在 Notebook 中断该 Cell。
 
-当前架构进一步把 SciPy 滤波、功率和平滑计算放到独立数值进程，避免它们与 Tk/VTK 事件处理在同一进程内并发。GUI 和曲线绘图仍由显示进程负责。显示子进程异常退出会在 Notebook 中报告普通 Python 错误及日志路径，已拟合分类保留在内核。第 8 节与第 11 节都使用此边界，重新生成或迁移 Notebook 也不会恢复直接在内核创建脑表面/曲线窗口的代码。
+Notebook 只传递可信本地提取/模型快照、源文件路径及显示设置，独立服务子进程拥有会话和数值子进程；源记录读取、SciPy 滤波、Hilbert 功率、平滑及有界缓存留在数值子进程。浏览器显示流程不创建 Tk、Qt 或 VTK 渲染窗口。Trial 质量复审与第二轮 PCA 复审仍使用原有流程；基线、特征、权重、手动 K、trial 剔除和已拟合标签不因更换显示后端而改变，音频仍仅供显示和描述性对照。
 
-启动器使用与当前 Notebook 内核相同的 Python 解释器和环境，原有 MNE、PyVista、Tk 等依赖须在该环境可用。Windows 数值进程使用同一环境中的 `pythonw.exe`，避免额外出现控制台窗口；其输出和底层错误在科学库导入前接入会话文件日志。单元在显示窗口工作期间保持阻塞；完成或关闭当前显示流程后继续运行，并分别保存 `surface_display_run` / `explorer_display_run`，其 `directory`、`pid`、`returncode` 记录本次显示会话。两项脑表面开关都开启时，在同一个子进程中依次显示两个脑视图；单独曲线查看使用 `explorer_only=True`。Windows 启动器先建立 Job 对象的进程树归属，再放行显示代码；中断或显示崩溃时终止并等待本次拥有的整个显示/数值进程树，不结束其他 Notebook 的进程。
+启动器沿用 Notebook 内核的 Python 环境。Windows 启动门控先建立 Job 对象的进程树归属，再放行服务代码；中断或失败时清理本次会话的服务/数值子进程。返回的 `surface_display_run` / `explorer_display_run` 仍以 `directory`、`pid`、`returncode` 记录会话。
 
-每次会话的本地快照、`stdout.log`、`stderr.log`、`numerical_stdout.log`、`numerical_stderr.log` 及状态/退出记录保留在对应轮次的 `display_sessions/时间戳/` 下。数值进程异常（包括启动失败、空闲时退出）会使显示会话返回失败，不会误报成功。`request.joblib` 只用于可信本地数据，不应加载来历不明的快照；快照可能占用数百 MB，不会上传或自动清除。常规脑表面截图仍由子进程写入轮次目录的 `joint_electrode_clusters.png`。
+对应轮次的 `display_sessions/时间戳/` 保留可信本地快照、`browser_session.json` 中的 URL/PID、`stdout.log`、`stderr.log`、`numerical_stdout.log`、`numerical_stderr.log` 及状态/退出记录；页面导出位于该轮次的 `browser_exports/`。服务或数值进程失败会在 Notebook 抛出普通 Python 异常并提供日志位置，已有分类仍在内核。缺失解剖、无效设置或 WebGL 不可用会显示错误；WebGL 失败时可用的 2D 曲线仍保留。浏览器失败不会自动重试 native 后端。`request.joblib` 只用于可信本地数据，快照可能占用数百 MB，不会自动清除。
 
 原始连续曲线不会因分类剔除而删掉真实记录：被剔除的选定通道 trial 标成 QC，类别平均连续图标注该事件中剔除的成员数。它们是原始信号对照，不应误读为重新纳入分类。
 
-`CACHE_MAX_MB=512` 分别设置连续静态图使用的内核缓存与显示会话中数值进程的有界连续功率缓存。每次新显示会话都从冷缓存开始，需要重新读取记录和计算功率，因此首次打开可能较慢；同一次显示会话内，缓存保留在数值进程中，切换配对或显示设置可以复用。会话结束后缓存释放，不跨会话复用。内核 `POWER_CACHE` 不传给子进程，`POWER_CACHE.clear()` / `POWER_CACHE.info()` 只影响第 9 节静态连续图；窗口的 Clear cache 将清理请求转发给数值进程，清除当前会话缓存。
+首次连续功率计算仍可能等待约一分钟，取决于记录长度和电脑性能；更换浏览器后端不承诺加快数值计算。页面显示实际加载/计算阶段及已等待秒数，完成后显示真实曲线。相同设置共用正在执行的计算；仅切换通道、类别、颜色或编号不重新滤波，更改配对或 sigma 会请求新计算，过时结果不会覆盖当前视图。
 
-在同一次显示会话中，切换配对或显示平滑时复用带通/Hilbert 功率，基线在缓存之后按当前配置应用；信号内容、采样率、通道次序、频带或滤波参数改变会使缓存失效。为避免修改预加载数据后误用缓存，每次查询仍校验整段数据，因此并非零耗时。缓存不足时明确报告并正确退回逐频带计算；缓存不提交到 Git。
+`CACHE_MAX_MB=512` 分别设置第 9 节内核静态图缓存和会话数值进程中的有界功率缓存。每个新会话从冷缓存开始，结束后释放；刷新页面复用仍活动的会话。`POWER_CACHE.clear()` / `POWER_CACHE.info()` 只影响第 9 节，页面的 Clear cache 清理当前会话的功率和最近结果缓存。缓存之后按现有配置应用基线；信号内容、采样率、通道次序、频带或滤波参数改变会使缓存失效，缓存不足时报告并退回逐频带计算。
 
-## 弹窗关闭与内核崩溃排查
+## 显式 Native 回退与排查
 
-数值进程另保留最近一次显示参数对应的连续数据；仅切换电极或类别时复用该数据，不重新对整段记录平滑。更换配对、时间范围、sigma 或采样网格会重新计算，Clear cache 同时清除功率缓存和最近显示数据。
+确需旧 PyVista/Tk 显示时，在参数区显式设置 `DISPLAY_BACKEND="native"` 后重跑显示 Cell；所需 PyVista、Tk 等依赖须在内核环境中可用。旧后端同样通过独立进程启动器运行，其 GIL/GUI 兼容性限制仍可能存在。此前真实独立 GUI 测试复现过 `PyEval_RestoreThread` 崩溃，不能把进程隔离理解为保证旧显示不会失败。
 
-若 Jupyter 日志出现 `invalid command name "...idle_draw"`，表示已关闭的 Tk 画布仍有待执行回调。复审和查看窗口现在会在销毁前取消 Matplotlib 绘图/事件循环回调，并先解绑 GUI 画布；两轮静态 PNG 导出独立使用 Agg 画布，即使默认后端为 TkAgg 也不创建额外 Tk 窗口。原有人工复审、PyVista 和曲线弹窗保留。
+若原有复审或显式 native 窗口日志出现 `invalid command name "...idle_draw"`，表示已关闭的 Tk 画布仍有待执行回调。复审和查看窗口会在销毁前取消 Matplotlib 绘图/事件循环回调，并先解绑 GUI 画布；两轮静态 PNG 导出独立使用 Agg 画布。
 
-更新后先重启 Notebook 内核，再从初始化、参数、提取和 trial 确认顺序运行，避免沿用旧窗口对象。本次接入直接修改现有 Notebook 的显示相关源代码，保留当前参数、已有输出和用户编辑，没有用生成器覆盖它。此修复不改变特征、手动 K、权重或分类标签；其他类型的内核崩溃仍需根据其 Jupyter 日志判断原因。
+已有当前模型且内核尚未重启时，先在一个临时 Cell 热更新启动器，再重跑显示 Cell，无需重新提取或聚类；仅改变后端变量不足以更新旧内核缓存的函数签名。
 
-连续曲线查看和脑表面联动窗口通过独立数值进程执行全记录滤波、功率及平滑计算，不再在 Tk/VTK 显示进程内运行 SciPy 后台数值线程。Tk/Matplotlib 绘图和控件更新仍只在显示进程的主线程进行。计算期间显示 `Rendering...`，窗口继续响应；计算结果返回显示进程后才绘图。切换显示参数或关闭窗口后，旧任务的结果不会回写。连续功率缓存由数值进程持有，同一显示会话内保留，Clear cache 请求也转发到该进程处理。
+```python
+import importlib
+import fourband.display_process as display_module
+run_display = importlib.reload(display_module).run_display
+DISPLAY_BACKEND = "browser"
+```
 
-首次连续功率计算可能需要约一分钟，具体取决于记录长度和电脑性能。等待时会先显示四个频带的坐标区、`Computing continuous power` 和已等待秒数，不会绘制虚构曲线；完成后自动替换为真实曲线。状态及错误栏保留在控件下方，不再被可扩展画布挤出窗口。同一项计算尚未完成时切换电极、类别或频带会共用该任务，避免反复提交整段记录计算；更改配对或 sigma 仍会产生新任务。本次显示修复只需关闭旧弹窗后重跑显示 Cell，无需重新提取或聚类。
+若重启内核则需重新按初始化、参数、提取和人工复审顺序运行。现有 Notebook 仅修改显示相关源码，保留参数、已有输出和用户编辑，不整体重新生成。其他内核崩溃仍需根据 Jupyter 日志判断原因。
 
-`scripts/verify_isolated_fourband_display.py --request <可信本地 request.joblib 路径>` 可重放现有显示快照，结果另存于验证目录。诊断不仅检查导出文件，也检查实际 Tk 画布像素；`--explorer-only` 可单独验证曲线窗口。
+`scripts/verify_isolated_fourband_display.py --request <可信本地 request.joblib 路径>` 属于旧 native 显示诊断，检查实际 Tk 画布像素；`--explorer-only` 可单独验证旧曲线窗口。这些结果不能代替浏览器流程验证。
 
 复现实际参数和既有人工选择可使用 `scripts/reproduce_fourband_kernel.py`，结果另存于 `outputs/verification/kernel_reproduction/`；不改写用户 Notebook。`--inprocess` 在指定环境中按单元顺序执行，保留真实 Tk/VTK 窗口，但并非 Jupyter 内核测试。诊断工具不启用周期性底层栈转储：该环境中它本身已触发访问冲突，不能把此类诊断崩溃误判为绘图故障。

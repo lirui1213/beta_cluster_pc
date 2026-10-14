@@ -41,12 +41,12 @@ def display_namespace(tmp_path):
     def launch(extraction, result, *, output_dir, fif_path=None, onset_path=None,
                offset_path=None, wav_path=None, surface_options=None, show_surface=False,
                show_selectable=False, link_explorer=True, explorer_settings=None,
-               cache_max_mb=512, explorer_only=False):
+               cache_max_mb=512, explorer_only=False, backend="browser"):
         calls.append(dict(extraction=extraction, result=result, output_dir=output_dir,
             fif_path=fif_path, onset_path=onset_path, offset_path=offset_path, wav_path=wav_path,
             surface_options=surface_options, show_surface=show_surface, show_selectable=show_selectable,
             link_explorer=link_explorer, explorer_settings=explorer_settings,
-            cache_max_mb=cache_max_mb, explorer_only=explorer_only))
+            cache_max_mb=cache_max_mb, explorer_only=explorer_only, backend=backend))
         return display_run
 
     namespace = dict(extraction=extraction, first_extraction=extraction,
@@ -54,7 +54,7 @@ def display_namespace(tmp_path):
         ROUND1_DIR=tmp_path / "round1", ROUND2_DIR=tmp_path / "round2",
         RUN_3D_RENDER=True, RUN_SELECTABLE_CLUSTER_RENDER=True,
         SECOND_ROUND_READY=True, TRIAL_QC_READY=True, OPEN_EXPLORER=True,
-        LINK_SURFACE_EXPLORER=True, CACHE_MAX_MB=123,
+        LINK_SURFACE_EXPLORER=True, CACHE_MAX_MB=123, DISPLAY_BACKEND="browser",
         FIF_PATH=Path("recording.fif"), ONSET_PATH=Path("onset.npy"),
         OFFSET_PATH=Path("offset.npy"), WAV_PATH=Path("audio.wav"),
         ELECTRODE_CSV=Path("electrodes.csv"), SUBJECTS_DIR=Path("anatomy"),

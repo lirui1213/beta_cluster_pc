@@ -78,22 +78,44 @@ class DisplayComputation:
                 self.failure = error
 
     def raise_if_failed(self):
+        broken = getattr(self.pool, "_broken", False) if self.pool is not None else False
+        if broken:
+            self.failure = RuntimeError(str(broken))
         if self.failure is not None:
             raise RuntimeError(f"Numerical display process failed: {self.failure}") from self.failure
 
     def submit(self, settings):
+        return self.submit_task(prepare_snapshot, self.request_path, settings)
+
+    def submit_task(self, function, *args):
         try:
             if self.pool is None:
                 os.environ["FOURBAND_NUMERICAL_LOG_DIR"] = str(self.request_path.resolve().parent)
                 multiprocessing.set_executable(numerical_executable())
                 self.pool = ProcessPoolExecutor(max_workers=1,
                     mp_context=multiprocessing.get_context("spawn"), initializer=_watch_display_parent)
-            future = self.pool.submit(prepare_snapshot, self.request_path, settings)
+            future = self.pool.submit(function, *args)
         except Exception as error:
             self.failure = error
             raise
         future.add_done_callback(self._remember_result)
         return future
+
+    def abort(self):
+        """Stop only this pool's processes when the user closes a live session."""
+        if self.pool is not None:
+            pool, self.pool = self.pool, None
+            processes = list((getattr(pool, "_processes", None) or {}).values())
+            pool.shutdown(wait=False, cancel_futures=True)
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+            for process in processes:
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.kill()
+                    process.join(timeout=5)
+            pool.shutdown(wait=True, cancel_futures=True)
 
     def clear(self):
         if self.pool is not None:

@@ -80,6 +80,7 @@ FEATURE_SMOOTH_SIGMA_SECONDS = .06
 FEATURE_SLOPE_METHOD = "savgol"
 DISPLAY_SMOOTH_SIGMA_SECONDS = .10
 DISPLAY_SFREQ = 100.0
+DISPLAY_BACKEND = "browser"  # "native": explicit legacy fallback
 
 OUTPUT_ROOT = FOURBAND_DIR / "outputs" / SUBJECT_ID / BLOCK_ID
 RUN_3D_RENDER = False
@@ -224,7 +225,7 @@ else:
                 post_seconds=globals().get("TRIAL_POST_SECONDS", 1.0),
                 sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, display_sfreq=DISPLAY_SFREQ,
                 trial_ids=globals().get("TRIAL_PAIR_IDS", None)),
-            cache_max_mb=globals().get("CACHE_MAX_MB", 512))'''),
+            cache_max_mb=globals().get("CACHE_MAX_MB", 512), backend=DISPLAY_BACKEND)'''),
         m("## 9. 相邻双 trial 连续显示\n\n横轴为相对第一次 onset 的真实秒数，完整保留两个 trial 及中间间隔。原始 trial 编号从 0 开始，不是筛选后的行号；从下方相邻配对表选取。音频包络保留，分类不使用音频。pre_onset 模式的整幅连续图统一使用第一个 trial 的基线；SEM 表示电极间差异，不是两个 trial 的置信区间。重跑本节不会重新分类。"),
         c('''TRIAL_PAIR_IDS = None  # None: first available pair; or (original_id_1, original_id_2)
 TRIAL_PRE_SECONDS = 1.0
@@ -267,6 +268,8 @@ def update_review_cells(output):
     existing = nbf.read(output, as_version=4)
     if any("WEIGHT_PRESET =" in cell.source for cell in existing.cells):
         return update_reliability_cells(output)
+    if _has_process_displays(existing):
+        return update_browser_cells(output)
     revised = build_notebook()
     owners = {
         2: ("code", "PROJECT_DIR =", "from fourband.analysis import"),
@@ -281,9 +284,6 @@ def update_review_cells(output):
     for index in (11, 12, 13, 14):
         cell = existing.cells[positions[index]]
         cell.source = revised.cells[index].source
-        if cell.cell_type == "code":
-            cell.outputs = []
-            cell.execution_count = None
     initialization = existing.cells[positions[2]]
     initialization.source = initialization.source.replace(
         "from visualization import BadChannelReviewWindow, render_electrode_clusters, render_selectable_electrode_class",
@@ -298,6 +298,7 @@ def update_review_cells(output):
             "from fourband.review import pca_review_table, refit_reviewed",
             "from fourband.review import pca_review_table, refit_reviewed\n" + import_line)
     existing.cells[positions[16]].source = revised.cells[16].source
+    _update_browser_sources(existing)
     nbf.validate(existing)
     nbf.write(existing, output)
 
@@ -308,6 +309,59 @@ def _owned_cell(notebook, cell_type, *markers):
     if len(matches) != 1:
         raise ValueError(f"Cannot uniquely identify owned notebook cell: {markers}. No file was changed.")
     return matches[0]
+
+
+def _has_process_displays(notebook):
+    markers = ["if RUN_3D_RENDER"]
+    if any("WEIGHT_PRESET =" in cell.source for cell in notebook.cells):
+        markers.append("if OPEN_EXPLORER:")
+    for marker in markers:
+        matches = [cell for cell in notebook.cells if cell.cell_type == "code" and marker in cell.source]
+        if len(matches) != 1 or not any(isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == "run_display"
+                for node in ast.walk(ast.parse(matches[0].source))):
+            return False
+    return True
+
+
+def _update_browser_sources(notebook):
+    """Patch only missing settings/keywords; retain every existing cell payload."""
+    parameters = notebook.cells[_owned_cell(notebook, "code", "SUBJECT_ID =", "def extraction_settings():")]
+    displays = [notebook.cells[_owned_cell(notebook, "code", "if RUN_3D_RENDER")]]
+    if any("WEIGHT_PRESET =" in cell.source for cell in notebook.cells):
+        displays.append(notebook.cells[_owned_cell(notebook, "code", "if OPEN_EXPLORER:")])
+    sources = []
+    for cell in displays:
+        source = cell.source
+        calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name) and node.func.id == "run_display"]
+        if len(calls) != 1:
+            raise ValueError("Expected one process launcher per display cell. No file was changed.")
+        call = calls[0]
+        if not any(keyword.arg == "backend" for keyword in call.keywords):
+            lines = source.splitlines(keepends=True)
+            # AST columns count UTF-8 bytes, including any user text on this line.
+            column = len(lines[call.end_lineno - 1].encode("utf-8")[:call.end_col_offset].decode("utf-8"))
+            offset = sum(map(len, lines[:call.end_lineno - 1])) + column - 1
+            separator = " " if source[:offset].rstrip().endswith(",") else ", "
+            source = source[:offset] + separator + "backend=DISPLAY_BACKEND" + source[offset:]
+        sources.append(source)
+    has_backend = any(isinstance(node, (ast.Assign, ast.AnnAssign))
+        and any(isinstance(target, ast.Name) and target.id == "DISPLAY_BACKEND"
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]))
+        for cell in notebook.cells if cell.cell_type == "code" for node in ast.parse(cell.source).body)
+    if not has_backend:
+        parameters.source += '\nDISPLAY_BACKEND = "browser"'
+    for cell, source in zip(displays, sources):
+        cell.source = source
+
+
+def update_browser_cells(output):
+    """Migrate existing process display cells without regenerating the notebook."""
+    existing = nbf.read(output, as_version=4)
+    _update_browser_sources(existing)
+    nbf.validate(existing)
+    nbf.write(existing, output)
 
 
 def _preserve_display_parameters(source, revised):
@@ -332,6 +386,8 @@ def update_continuous_cells(output):
     existing = nbf.read(output, as_version=4)
     if any("WEIGHT_PRESET =" in cell.source for cell in existing.cells):
         return update_reliability_cells(output)
+    if _has_process_displays(existing):
+        return update_browser_cells(output)
     revised = build_notebook()
     _owned_cell(existing, "code", "SUBJECT_ID =", "def extraction_settings():")
     owners = {
@@ -359,10 +415,7 @@ def update_continuous_cells(output):
         existing.cells[insert_at:insert_at] = revised.cells[17:]
     for revised_index, existing_index in positions.items():
         existing.cells[existing_index].source = revised.cells[revised_index].source
-    for cell in existing.cells:
-        if cell.cell_type == "code":
-            cell.outputs = []
-            cell.execution_count = None
+    _update_browser_sources(existing)
     nbf.validate(existing)
     nbf.write(existing, output)
 
@@ -500,7 +553,7 @@ if OPEN_EXPLORER:
             post_seconds=globals().get("TRIAL_POST_SECONDS", 1.0),
             sigma_seconds=DISPLAY_SMOOTH_SIGMA_SECONDS, display_sfreq=DISPLAY_SFREQ,
             trial_ids=globals().get("TRIAL_PAIR_IDS", None)),
-        cache_max_mb=CACHE_MAX_MB, explorer_only=True)''')
+        cache_max_mb=CACHE_MAX_MB, explorer_only=True, backend=DISPLAY_BACKEND)''')
     notebook.cells[9:9] = [nbf.v4.new_markdown_cell("## 4.1 Trial 质量人工复审\n\n候选伪迹默认只标记，不自动剔除。勾选通道 × 原始 trial 编号并确认后，四频带共同剔除对应响应。取消不会应用待选项；有效 trial 太少的电极仍按已有质量规则排除并报告。"), qc]
     notebook.cells[5:5] = [nbf.v4.new_markdown_cell("## 2.1 可靠性与查看参数\n\n默认 legacy 保持原权重；可改 balanced、morphology、amplitude 或 custom。修改分类权重后重跑第一轮及第二轮。质量阈值只生成候选项，剔除仍须人工确认。"), settings]
     notebook.cells.extend([nbf.v4.new_markdown_cell("## 10. 稳定性与同类细节\n\n按已经拟合的 K 做分半及 trial 重采样，不自动选 K，也不因支持次数少而阻止分类。细线/电极热图反映同类内部差异；trial 热图保留原编号。试次重采样置信带以固定电极和标签为条件，不代表显著性或分类可信概率。"), diagnostics,
@@ -539,7 +592,10 @@ def _preserve_assignments(source, revised, names):
 
 
 def update_reliability_cells(output):
-    existing, revised = nbf.read(output, as_version=4), build_reliability_notebook()
+    existing = nbf.read(output, as_version=4)
+    if any("WEIGHT_PRESET =" in cell.source for cell in existing.cells) and _has_process_displays(existing):
+        return update_browser_cells(output)
+    revised = build_reliability_notebook()
     _owned_cell(existing, "code", "SUBJECT_ID =", "def extraction_settings():")
     markers = [("PROJECT_DIR =", "from fourband.analysis import"),
         ("pending_settings = extraction_settings()",), ("pending_first = fit_joint(",),
@@ -575,9 +631,7 @@ def update_reliability_cells(output):
             else:
                 insert_at = len(existing.cells)
             existing.cells[insert_at:insert_at] = [revised.cells[new_index - 1], revised.cells[new_index]]
-    for cell in existing.cells:
-        if cell.cell_type == "code":
-            cell.outputs, cell.execution_count = [], None
+    _update_browser_sources(existing)
     nbf.validate(existing)
     nbf.write(existing, output)
 
@@ -588,13 +642,18 @@ if __name__ == "__main__":
     parser.add_argument("--update-review", action="store_true")
     parser.add_argument("--update-continuous", action="store_true")
     parser.add_argument("--update-reliability", action="store_true")
+    parser.add_argument("--update-browser", action="store_true")
     args = parser.parse_args()
     output = Path(__file__).with_name("ECoG_4band_clustering_pipeline.ipynb")
-    if args.update_reliability:
+    if args.update_browser:
+        update_browser_cells(output)
+    elif args.update_reliability:
         update_reliability_cells(output)
     elif args.update_continuous:
         update_continuous_cells(output)
     elif args.update_review:
+        update_review_cells(output)
+    elif output.exists():
         update_review_cells(output)
     else:
         nbf.write(build_notebook(), output)

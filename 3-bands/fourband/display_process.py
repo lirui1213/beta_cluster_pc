@@ -1,4 +1,4 @@
-"""Launch native display windows without importing GUI code into the caller."""
+"""Launch an owned local browser service or an explicit legacy native display."""
 from dataclasses import dataclass
 from datetime import datetime
 import json
@@ -11,7 +11,8 @@ import joblib
 from .display_lifecycle import DisplayProcessTree
 
 
-_WORKER_SCRIPT = Path(__file__).with_name("display_worker.py")
+_WORKER_SCRIPT = Path(__file__).with_name("browser_worker.py")
+_NATIVE_WORKER_SCRIPT = Path(__file__).with_name("display_worker.py")
 
 
 @dataclass(frozen=True)
@@ -45,15 +46,17 @@ def _stop_child(child):
 def run_display(extraction, result, *, output_dir, fif_path=None, onset_path=None,
                 offset_path=None, wav_path=None, surface_options=None, show_surface=False,
                 show_selectable=False, link_explorer=True, explorer_settings=None,
-                cache_max_mb=512, explorer_only=False):
-    """Block until the owned GUI process exits; load only trusted local snapshots.
+                cache_max_mb=512, explorer_only=False, backend="browser"):
+    """Block until the owned display process exits; use trusted local snapshots.
 
     Only data/model snapshots cross the boundary, never raw GUI objects or a
-    live cache. Closing the windows returns normally; interrupting kills only
-    this launch's child. Abnormal native exits become ordinary Python errors.
+    live cache. Close Session ends the browser service; interrupting cleans up
+    only this launch's process tree. Abnormal exits are ordinary Python errors.
     """
     if not (show_surface or show_selectable or explorer_only):
         return None
+    if backend not in {"browser", "native"}:
+        raise ValueError("backend must be browser or native.")
     sources = dict(fif_path=fif_path, onset_path=onset_path, offset_path=offset_path, wav_path=wav_path)
     if link_explorer or explorer_only:
         for name, path in sources.items():
@@ -69,7 +72,8 @@ def run_display(extraction, result, *, output_dir, fif_path=None, onset_path=Non
         sources={key: str(Path(value).resolve()) if value is not None else None for key, value in sources.items()},
         surface_options=dict(surface_options or {}), show_surface=bool(show_surface),
         show_selectable=bool(show_selectable), link_explorer=bool(link_explorer),
-        explorer_only=bool(explorer_only), explorer_settings=dict(explorer_settings or {}), cache_max_mb=cache_max_mb)
+        explorer_only=bool(explorer_only), explorer_settings=dict(explorer_settings or {}), cache_max_mb=cache_max_mb,
+        backend=backend)
     request_path = directory / "request.joblib"
     joblib.dump(request, request_path)
     environment = os.environ.copy()
@@ -80,7 +84,8 @@ def run_display(extraction, result, *, output_dir, fif_path=None, onset_path=Non
     environment.setdefault("OMP_NUM_THREADS", "1")
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     with (directory / "stdout.log").open("wb") as stdout, (directory / "stderr.log").open("wb") as stderr:
-        child = subprocess.Popen([sys.executable, str(_WORKER_SCRIPT), str(request_path)],
+        script = _WORKER_SCRIPT if backend == "browser" else _NATIVE_WORKER_SCRIPT
+        child = subprocess.Popen([sys.executable, str(script), str(request_path)],
             stdout=stdout, stderr=stderr, stdin=subprocess.PIPE, shell=False,
             env=environment, creationflags=flags, start_new_session=os.name != "nt")
         tree = None
@@ -89,6 +94,20 @@ def run_display(extraction, result, *, output_dir, fif_path=None, onset_path=Non
             print(f"Display process PID {child.pid}; logs: {directory}", flush=True)
             child.stdin.write(b"\n")
             child.stdin.close()
+            announced_url = False
+            if backend == "browser" and script.name == "browser_worker.py":
+                while child.poll() is None:
+                    url_file = directory / "browser_session.json"
+                    if not announced_url and url_file.is_file():
+                        try:
+                            url = json.loads(url_file.read_text(encoding="utf-8"))["url"]
+                        except (OSError, ValueError, KeyError):
+                            pass
+                        else:
+                            print(f"Local four-band explorer: {url}", flush=True)
+                            announced_url = True
+                    import time
+                    time.sleep(.1)
             returncode = child.wait()
         except BaseException:
             try:

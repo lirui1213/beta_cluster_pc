@@ -13,6 +13,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "3-bands"))
 
 
+def test_browser_is_default_and_invalid_backend_never_launches(tmp_path):
+    from fourband import display_process as module
+    assert module._WORKER_SCRIPT.name == "browser_worker.py"
+    with pytest.raises(ValueError, match="backend"):
+        module.run_display({}, {}, output_dir=tmp_path, show_surface=True,
+                           link_explorer=False, backend="unknown")
+
+
 def test_display_snapshot_is_local_and_uses_same_interpreter(tmp_path, monkeypatch):
     from fourband import display_process as module
     captured = {}
@@ -27,6 +35,8 @@ def test_display_snapshot_is_local_and_uses_same_interpreter(tmp_path, monkeypat
             assert request["result"].labels == [0]
             assert request["surface_options"]["brain_opacity"] == .5
         def wait(self, timeout=None):
+            return 0
+        def poll(self):
             return 0
 
     monkeypatch.setattr(module.subprocess, "Popen", Child)
@@ -51,6 +61,8 @@ def test_child_crash_is_an_exception_not_parent_exit(tmp_path, monkeypatch):
             self.stdin = io.BytesIO()
             kwargs["stderr"].write(b"Fatal Python error: PyEval_RestoreThread\n")
         def wait(self, timeout=None):
+            return 3221226505
+        def poll(self):
             return 3221226505
 
     monkeypatch.setattr(module.subprocess, "Popen", Child)
@@ -77,6 +89,8 @@ def test_interrupt_terminates_only_owned_child(tmp_path, monkeypatch):
             return -1
         def terminate(self):
             events.append("terminate")
+        def poll(self):
+            raise KeyboardInterrupt
 
     monkeypatch.setattr(module.subprocess, "Popen", Child)
     monkeypatch.setattr(module, "DisplayProcessTree", lambda child: SimpleNamespace(close=lambda: None), raising=False)
