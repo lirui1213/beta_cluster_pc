@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>四频带分析工作区</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="workspace.css" />
+    <script defer src="vendor/plotly.js-dist-min/plotly.min.js"></script>
+    <script defer src="vendor/lucide/lucide.min.js"></script>
+    <script type="module" src="workspace.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1><i data-lucide="activity" aria-hidden="true"></i>四频带分析</h1>
+      <div class="context-controls">
+        <label>患者<select id="subject"></select></label
+        ><label>区块<select id="block"></select></label>
+        <label class="history-label"
+          >分析记录<select id="history">
+            <option value="">新分析</option>
+          </select></label
+        >
+      </div>
+      <div class="commands">
+        <button
+          id="refresh"
+          class="icon"
+          title="刷新状态"
+          aria-label="刷新状态"
+        >
+          <i data-lucide="refresh-cw"></i>
+        </button>
+        <button id="cancel" disabled>
+          <i data-lucide="square"></i>取消任务</button
+        ><button id="close" class="icon" title="关闭会话" aria-label="关闭会话">
+          <i data-lucide="power"></i>
+        </button>
+      </div>
+    </header>
+    <section class="statusbar" aria-live="polite">
+      <span id="connection">连接中</span><span id="stage">空闲</span
+      ><span id="task-status"></span><span id="task-stage"></span
+      ><span id="elapsed"></span><span id="run-id"></span>
+    </section>
+    <div id="error" role="alert" hidden></div>
+    <nav role="tablist" aria-label="分析视图">
+      <button
+        id="tab-settings"
+        role="tab"
+        aria-controls="pane-settings"
+        aria-selected="true"
+        data-pane="settings"
+      >
+        <i data-lucide="sliders-horizontal"></i>设置
+      </button>
+      <button
+        id="tab-trials"
+        role="tab"
+        aria-controls="pane-trials"
+        aria-selected="false"
+        data-pane="trials"
+      >
+        <i data-lucide="table-2"></i>试次审查<span id="trial-count"></span>
+      </button>
+      <button
+        id="tab-review"
+        role="tab"
+        aria-controls="pane-review"
+        aria-selected="false"
+        data-pane="review"
+      >
+        <i data-lucide="scatter-chart"></i>分类审查
+      </button>
+      <button
+        id="tab-results"
+        role="tab"
+        aria-controls="pane-results"
+        aria-selected="false"
+        data-pane="results"
+      >
+        <i data-lucide="box"></i>结果
+      </button>
+    </nav>
+    <main>
+      <section
+        id="pane-settings"
+        role="tabpanel"
+        aria-labelledby="tab-settings"
+      >
+        <div class="section-heading">
+          <h2>提取设置</h2>
+          <button id="start" class="primary" disabled>
+            <i data-lucide="play"></i>开始提取
+          </button>
+        </div>
+        <form id="config-form">
+          <div class="settings-grid">
+            <fieldset>
+              <legend>基线与特征</legend>
+              <label
+                >基线模式<select id="baseline-mode">
+                  <option value="file">基线文件</option>
+                  <option value="pre_onset">起始前窗口</option>
+                </select></label
+              >
+              <label id="baseline-segments-label" hidden
+                >基线片段<select id="baseline-segments">
+                  <option value="">不使用片段表</option>
+                </select></label
+              >
+              <div class="two-columns">
+                <label
+                  >窗口开始 (s)<input
+                    id="baseline-start"
+                    type="number"
+                    value="-1.3"
+                    step=".1" /></label
+                ><label
+                  >窗口结束 (s)<input
+                    id="baseline-end"
+                    type="number"
+                    value="-.3"
+                    step=".1"
+                    max="0"
+                /></label>
+              </div>
+              <label
+                >基线边缘 (s)<input
+                  id="baseline-edge"
+                  type="number"
+                  value=".3"
+                  min="0"
+                  step=".1"
+              /></label>
+              <label
+                >特征平滑 σ (s)<input
+                  id="feature-sigma"
+                  type="number"
+                  value=".06"
+                  min="0"
+                  step=".01"
+              /></label>
+              <div id="baseline-warning" class="warning" hidden>
+                短 Theta 基线可能不稳定；靠近起始的窗口存在时间泄漏风险。
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>频带权重</legend>
+              <label
+                >Theta · 4–8 Hz<input
+                  id="weight-theta"
+                  type="number"
+                  min=".001"
+                  value="1"
+                  step=".1"
+              /></label>
+              <label
+                >Beta1 · 13–24 Hz<input
+                  id="weight-beta1"
+                  type="number"
+                  min=".001"
+                  value="1"
+                  step=".1"
+              /></label>
+              <label
+                >Beta2 · 24–40 Hz<input
+                  id="weight-beta2"
+                  type="number"
+                  min=".001"
+                  value="1"
+                  step=".1"
+              /></label>
+              <label
+                >High-gamma · 70–150 Hz<input
+                  id="weight-high_gamma"
+                  type="number"
+                  min=".001"
+                  value="1"
+                  step=".1"
+              /></label>
+            </fieldset>
+            <fieldset>
+              <legend>分类权重</legend>
+              <label
+                >权重预设<select id="weight-preset">
+                  <option value="legacy">传统</option>
+                  <option value="balanced">均衡</option>
+                  <option value="morphology">形态优先</option>
+                  <option value="amplitude">幅度优先</option>
+                  <option value="custom">自定义</option>
+                </select></label
+              >
+              <div id="group-weights" hidden>
+                <label
+                  >形态<input
+                    id="group-morphology"
+                    type="number"
+                    value="1"
+                    min="0"
+                    step=".1" /></label
+                ><label
+                  >幅度<input
+                    id="group-amplitude"
+                    type="number"
+                    value="1"
+                    min="0"
+                    step=".1" /></label
+                ><label
+                  >斜率<input
+                    id="group-slope"
+                    type="number"
+                    value="1"
+                    min="0"
+                    step=".1"
+                /></label>
+              </div>
+              <label
+                >第一轮 K<input
+                  id="first-k"
+                  type="number"
+                  value="10"
+                  min="2"
+                  step="1"
+              /></label>
+            </fieldset>
+          </div>
+        </form>
+        <section class="inputs-section">
+          <h2>输入文件</h2>
+          <div id="inputs" aria-live="polite"></div>
+        </section>
+        <details>
+          <summary>有效设置</summary>
+          <pre id="effective-config"></pre>
+        </details>
+      </section>
+      <section
+        id="pane-trials"
+        role="tabpanel"
+        aria-labelledby="tab-trials"
+        hidden
+      >
+        <div class="section-heading">
+          <h2>试次排除</h2>
+          <button
+            id="confirm-trials"
+            class="primary"
+            data-action="confirm_trials"
+            disabled
+          >
+            <i data-lucide="check"></i>确认排除
+          </button>
+        </div>
+        <div class="toolbar qc-settings">
+          <label
+            >尖峰 Z<input
+              id="spike-z"
+              type="number"
+              min=".01"
+              step="1"
+              value="10" /></label
+          ><label
+            >跳变 Z<input
+              id="jump-z"
+              type="number"
+              min=".01"
+              step="1"
+              value="10" /></label
+          ><label
+            >平直时长 (s)<input
+              id="flat-run"
+              type="number"
+              min=".001"
+              step=".01"
+              value=".05" /></label
+          ><button id="detect-qc" data-action="detect_qc" disabled>
+            <i data-lucide="scan-line"></i>重检候选
+          </button>
+        </div>
+        <div class="toolbar">
+          <label
+            >筛选<select id="candidate-filter">
+              <option value="all">全部</option>
+              <option value="candidate">候选</option>
+              <option value="selected">已选</option>
+              <option value="spike">尖峰</option>
+              <option value="jump">跳变</option>
+              <option value="flat">平直</option>
+              <option value="clipping">削波</option>
+            </select></label
+          ><label
+            >通道<input id="channel-filter" type="search" placeholder="通道名"
+          /></label>
+          <button id="select-candidates" disabled>选择候选</button
+          ><button
+            id="clear-trials"
+            class="icon"
+            title="清空选择"
+            aria-label="清空选择"
+            disabled
+          >
+            <i data-lucide="eraser"></i></button
+          ><button
+            id="undo-trials"
+            class="icon"
+            title="撤销选择"
+            aria-label="撤销选择"
+            disabled
+          >
+            <i data-lucide="undo-2"></i></button
+          ><output id="selection-count">已选 0</output>
+        </div>
+        <div id="trial-grid" class="table-scroll" tabindex="0"></div>
+        <div class="toolbar waveform-controls">
+          <label>通道<select id="waveform-channel"></select></label
+          ><label>原始试次<select id="waveform-trial"></select></label
+          ><button id="waveform" data-action="waveform" disabled>
+            <i data-lucide="audio-lines"></i>原始波形
+          </button>
+        </div>
+        <div id="waveform-plot" class="plot waveform-plot"></div>
+        <div class="section-heading">
+          <h2>第一轮分类</h2>
+          <button
+            id="fit-first"
+            data-action="fit_first"
+            class="primary"
+            disabled
+          >
+            <i data-lucide="play"></i>拟合第一轮
+          </button>
+        </div>
+      </section>
+      <section
+        id="pane-review"
+        role="tabpanel"
+        aria-labelledby="tab-review"
+        hidden
+      >
+        <div class="section-heading">
+          <h2>第一轮复审 · PCA 与电极</h2>
+          <span id="round-status"></span>
+        </div>
+        <div class="review-layout">
+          <div>
+            <div id="pca-plot" class="plot pca-plot"></div>
+            <div id="cluster-sizes" class="cluster-sizes"></div>
+          </div>
+          <div class="review-controls">
+            <fieldset>
+              <legend>第二轮排除</legend>
+              <label class="check"
+                ><input
+                  id="distance-enabled"
+                  type="checkbox"
+                />启用距离阈值</label
+              >
+              <label
+                >距离阈值<input
+                  id="distance-threshold"
+                  type="number"
+                  min=".001"
+                  value="3"
+                  step=".1"
+                  disabled
+              /></label>
+              <label
+                >距离参照<select id="distance-reference">
+                  <option value="global">全局</option>
+                  <option value="cluster">类内</option>
+                </select></label
+              >
+              <label
+                >排除类别<select
+                  id="bad-clusters"
+                  multiple
+                  size="4"
+                  aria-label="排除类别"
+                ></select
+              ></label>
+              <label
+                >排除通道<select
+                  id="bad-channels"
+                  multiple
+                  size="5"
+                  aria-label="排除通道"
+                ></select
+              ></label>
+              <label
+                >第二轮 K<input
+                  id="second-k"
+                  type="number"
+                  value="4"
+                  min="2"
+                  step="1"
+              /></label>
+              <div class="review-actions">
+                <button
+                  id="preview-review"
+                  data-action="preview_review"
+                  disabled
+                >
+                  <i data-lucide="eye"></i>预览排除</button
+                ><button id="reset-review">
+                  <i data-lucide="rotate-ccw"></i>重置
+                </button>
+              </div>
+              <output id="preview-summary">尚未预览</output>
+              <button
+                id="fit-second"
+                data-action="fit_second"
+                class="primary"
+                disabled
+              >
+                <i data-lucide="check-check"></i>确认并拟合第二轮
+              </button>
+            </fieldset>
+          </div>
+        </div>
+        <div class="toolbar stability-controls">
+          <h2>稳定性</h2>
+          <label
+            >轮次<select id="stability-round">
+              <option value="1">第一轮</option>
+              <option value="2">第二轮</option>
+            </select></label
+          ><span>重采样 5 次</span
+          ><button id="stability" data-action="stability" disabled>
+            <i data-lucide="chart-no-axes-combined"></i>运行</button
+          ><output id="stability-summary"></output>
+        </div>
+      </section>
+      <section
+        id="pane-results"
+        role="tabpanel"
+        aria-labelledby="tab-results"
+        hidden
+      >
+        <div class="toolbar">
+          <h2>脑图与曲线</h2>
+          <label class="round-label">拟合记录<select id="round"></select></label
+          ><span id="result-identity"></span>
+        </div>
+        <iframe id="explorer" title="四频带脑图与曲线" hidden></iframe>
+        <div id="result-empty" class="empty">尚无已接受结果</div>
+        <details id="artifact-panel" hidden>
+          <summary id="artifacts-summary">导出文件 (0)</summary>
+          <div id="artifacts" class="artifacts"></div>
+        </details>
+      </section>
+    </main>
+    <details id="logs">
+      <summary>任务日志</summary>
+      <pre id="log-tail"></pre>
+    </details>
+  </body>
+</html>

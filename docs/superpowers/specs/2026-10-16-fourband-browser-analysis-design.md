@@ -222,5 +222,5 @@ actionable errors without changing the active accepted state.
 - [x] Display-only versus full-analysis approaches offered; user chose B.
 - [x] Full workflow presented and approved by the user.
 - [x] Written specification checked for scope, contradictions and ambiguity.
-- [ ] User review of this written specification.
-- [ ] Detailed implementation plan and test-first execution after review.
+- [x] User review of this written specification; explicitly requested implementation.
+- [x] Detailed implementation plan and test-first execution after review.

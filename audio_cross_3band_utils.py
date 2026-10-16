@@ -670,6 +670,7 @@ def extract_beta_progress_epochs(
     baseline_window: tuple[float, float] = (-1.3, -0.3),
     baseline_fif: str | Path | None = None,
     baseline_segments_csv: str | Path | None = None,
+    baseline_auto_discover_segments: bool = True,
     baseline_edge_seconds: float = 0.3,
     filter_kwargs: Mapping[str, Any] | None = None,
 ) -> BetaProgressEpochs:
@@ -767,6 +768,7 @@ def extract_beta_progress_epochs(
         file_reference = load_file_baseline_statistics(
             baseline_fif, channel_names, beta_band=(beta_low, beta_high),
             segments_csv=baseline_segments_csv, edge_seconds=baseline_edge_seconds,
+            auto_discover_segments=baseline_auto_discover_segments,
             relative_floor=baseline_relative_floor, absolute_floor=epsilon,
             task_info=picked.info, filter_kwargs=kwargs,
         )

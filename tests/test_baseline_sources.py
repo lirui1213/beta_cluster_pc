@@ -206,6 +206,43 @@ def test_reference_falls_back_to_continuous_recording_when_no_boundaries(tmp_pat
     assert result.segments.boundary_source.iloc[0] == "whole_recording"
 
 
+@pytest.mark.parametrize("quiet", [False, True])
+def test_explicit_no_segment_selection_skips_companion_but_keeps_annotation_boundaries(tmp_path, quiet):
+    import mne
+    path, companion, raw = make_reference(tmp_path)
+    onsets, durations, descriptions = [2., 8.], [1., 0.], ["BAD_artifact", "BAD boundary"]
+    if quiet:
+        onsets += [0., 6.]
+        durations += [6., 6.]
+        descriptions += ["quiet_first", "quiet_second"]
+    raw.set_annotations(mne.Annotations(onsets, durations, descriptions))
+    raw.save(path, overwrite=True, verbose="ERROR")
+    explicit = reference_result(path, companion, auto_discover_segments=False)
+    assert explicit.segments.boundary_source.eq("csv").all()
+    legacy = reference_result(path, None)
+    assert legacy.segments.boundary_source.eq("csv").all()
+    result = reference_result(path, None, auto_discover_segments=False)
+    assert result.segments.boundary_source.eq("quiet_annotations" if quiet else "whole_recording").all()
+    assert not ((result.segments.start_seconds < 3) & (result.segments.stop_seconds > 2)).any()
+    assert not ((result.segments.start_seconds < 8) & (result.segments.stop_seconds > 8)).any()
+    companion.unlink()
+    expected = reference_result(path, None)
+    pd.testing.assert_frame_equal(result.segments, expected.segments)
+    np.testing.assert_allclose(result.mean, expected.mean)
+    np.testing.assert_allclose(result.std, expected.std)
+
+
+def test_epoch_extraction_threads_segment_discovery_optout(tmp_path):
+    path, _, raw = make_reference(tmp_path)
+    time = np.arange(2400) / 100.
+    task_raw = raw.copy()
+    events = load_speech_events([[2, 3], [5, 6], [8, 9]])
+    audio = AudioEnvelope(np.sin(time) ** 2, time, 100.)
+    epochs = extract_beta_progress_epochs(task_raw, events, audio, pre_post_window=.5,
+        baseline_mode="file", baseline_fif=path, baseline_auto_discover_segments=False)
+    assert epochs.baseline_segments.boundary_source.tolist() == ["whole_recording"]
+
+
 def test_file_baseline_is_invariant_to_voltage_scaling_and_rejects_unit_mismatch(tmp_path):
     import mne
     path, segments, raw = make_reference(tmp_path)

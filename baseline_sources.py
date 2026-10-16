@@ -93,6 +93,7 @@ def load_file_baseline_statistics(
     *,
     beta_band: tuple[float, float] = (13.0, 30.0),
     segments_csv: str | Path | None = None,
+    auto_discover_segments: bool = True,
     edge_seconds: float = 0.3,
     relative_floor: float = 1e-3,
     absolute_floor: float | None = None,
@@ -105,6 +106,7 @@ def load_file_baseline_statistics(
     Hilbert edges. This reduces, but cannot guarantee elimination of, analytic
     signal edge effects. At least one second of reference samples is required.
     Matching reference flags does not establish identical reference electrodes.
+    Disabling companion CSV discovery retains quiet, BAD and boundary annotations.
     """
     import mne
 
@@ -118,7 +120,7 @@ def load_file_baseline_statistics(
     if missing:
         raise ValueError(f"Baseline file missing task channels: {sorted(missing)}")
     _check_task_metadata(raw, channels, task_info)
-    if segments_csv is None:
+    if segments_csv is None and auto_discover_segments:
         companion = path.with_name(path.stem + "__segments.csv")
         segments_csv = companion if companion.is_file() else None
     intervals, source = _file_segments(raw, segments_csv)
