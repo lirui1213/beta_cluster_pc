@@ -182,8 +182,8 @@ function resetReview() {
   text("preview-summary", "尚未预览");
   plotKey = "";
 }
-function clearDisplays() {
-  for (const id of ["pca-plot", "waveform-plot"]) {
+function clearDisplays({keepReview = false} = {}) {
+  for (const id of keepReview ? ["waveform-plot"] : ["pca-plot", "waveform-plot"]) {
     if (window.Plotly) window.Plotly.purge($(id));
     $(id).replaceChildren();
   }
@@ -705,6 +705,41 @@ const plotLayout = {
     zerolinecolor: "#cbd5d9",
   },
 };
+function pcaLayout() {
+  const axis = (title) => ({
+    title: {text: title, font: {size: 12}},
+    tickfont: {size: 10},
+    nticks: 5,
+    showbackground: true,
+    backgroundcolor: "#f2f2f2",
+    gridcolor: "#fff",
+    zerolinecolor: "#b8b8b8",
+    showline: true,
+    linecolor: "#b8b8b8",
+  });
+  // Preview/round selection changes the markers, not the first-model viewpoint.
+  const revision = JSON.stringify([state?.run_id, state?.first_round_id]);
+  return {
+    paper_bgcolor: plotLayout.paper_bgcolor,
+    font: plotLayout.font,
+    margin: {l: 18, r: 18, t: 16, b: 50},
+    legend: {orientation: "h", y: 0, yanchor: "top", x: 0},
+    uirevision: revision,
+    scene: {
+      domain: {x: [0, 1], y: [.14, 1]},
+      uirevision: revision,
+      xaxis: axis("PC1"), yaxis: axis("PC2"), zaxis: axis("PC3"),
+      aspectmode: "cube",
+      dragmode: "orbit",
+      camera: {
+        eye: {x: 1.25, y: -2.165, z: 1.443},
+        center: {x: 0, y: 0, z: 0},
+        up: {x: 0, y: 0, z: 1},
+        projection: {type: "perspective"},
+      },
+    },
+  };
+}
 function plot(id, traces, layout) {
   if (!window.Plotly) {
     text(id, "Plotly 未加载");
@@ -763,7 +798,7 @@ function renderReview() {
   plot(
     "pca-plot",
     pcaTraces(points, Array.isArray(excluded) ? excluded : []),
-    plotLayout,
+    pcaLayout(),
   );
   const sizes = source.cluster_sizes ?? {};
   const entries = Array.isArray(sizes)
@@ -1018,7 +1053,7 @@ $("round").addEventListener(
       return;
     }
     gate.reset();
-    clearDisplays();
+    clearDisplays({keepReview: true});
     previewBinding = null;
     await mutate("select_round", { ...api.identity(state), round_id: id });
   }),

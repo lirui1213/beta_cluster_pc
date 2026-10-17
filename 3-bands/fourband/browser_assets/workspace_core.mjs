@@ -346,6 +346,7 @@ export function pcaRows(data) {
     channel: pca.channels?.[i] ?? data.channels?.[i],
     pc1: p[0],
     pc2: p[1],
+    pc3: p[2],
     cluster: pca.labels?.[i] ?? 0,
   }));
 }
@@ -353,44 +354,47 @@ export function pcaTraces(rows, excluded = []) {
   const groups = new Map(),
     bad = new Set(excluded.map(String));
   const colors = [
-    "#177e89",
-    "#b83b5e",
-    "#477b35",
-    "#a36a18",
-    "#6261a3",
-    "#007c58",
-    "#a34024",
-    "#426db0",
+    "red", "blue", "green", "purple", "gray",
+    "orange", "cyan", "magenta", "gold", "brown",
   ];
   for (const row of rows) {
-    const x = Number(row.pc1 ?? row.PC1 ?? row.x),
-      y = Number(row.pc2 ?? row.PC2 ?? row.y);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const coordinates = [
+      row.pc1 ?? row.PC1 ?? row.x,
+      row.pc2 ?? row.PC2 ?? row.y,
+      row.pc3 ?? row.PC3 ?? row.z,
+    ];
+    if (!coordinates.every((v) =>
+      (typeof v === "number" || (typeof v === "string" && v.trim() !== "")) &&
+      Number.isFinite(Number(v)))) continue;
+    const [x, y, z] = coordinates.map(Number);
     const channel = String(row.channel ?? row.channel_name ?? ""),
       cluster = row.cluster ?? row.first_label ?? row.label ?? 0;
     const removed = bad.has(channel),
       key = JSON.stringify([cluster, removed]);
     if (!groups.has(key))
       groups.set(key, {
-        type: rows.length > 2000 ? "scattergl" : "scatter",
+        type: "scatter3d",
         mode: "markers",
         name: `类 ${cluster}${removed ? " · 排除预览" : ""}`,
         x: [],
         y: [],
+        z: [],
         text: [],
         customdata: [],
         marker: {
-          size: 8,
+          size: removed ? 6 : 5,
           color: removed
-            ? "#9b3444"
-            : colors[Math.abs(Number(cluster) || 0) % colors.length],
+            ? "black"
+            : Number(cluster) < 0 ? "white" : colors[Math.abs(Number(cluster) || 0) % colors.length],
           symbol: removed ? "x" : "circle",
+          line: {color: "black", width: .5},
         },
         hovertemplate: "%{text}<extra>%{fullData.name}</extra>",
       });
     const trace = groups.get(key);
     trace.x.push(x);
     trace.y.push(y);
+    trace.z.push(z);
     trace.text.push(channel);
     trace.customdata.push(channel);
   }

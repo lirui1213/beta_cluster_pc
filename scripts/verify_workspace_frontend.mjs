@@ -11,6 +11,7 @@ import {
   canAction,
   safeLocalURL,
   normalizeQC,
+  pcaRows,
   pcaTraces,
   inputErrors,
   reviewData,
@@ -235,8 +236,8 @@ test("QC normalization preserves unflagged cells and PCA groups actual points", 
   assert.equal(rows[1].candidate, true);
   const traces = pcaTraces(
     [
-      { channel: "A", pc1: 1, pc2: 2, cluster: 0 },
-      { channel: "B", pc1: 3, pc2: 4, cluster: 1 },
+      { channel: "A", pc1: 1, pc2: 2, pc3: -5, cluster: 0 },
+      { channel: "B", pc1: 3, pc2: 4, pc3: 6, cluster: 1 },
     ],
     ["A"],
   );
@@ -248,8 +249,37 @@ test("QC normalization preserves unflagged cells and PCA groups actual points", 
     traces.find((t) => t.customdata.includes("A")).marker.symbol,
     "x",
   );
-  const actual = pcaTraces([{ channel: "A", pc1: 1, pc2: 2, first_label: 2 }]);
+  assert.ok(traces.every((t) => t.type === "scatter3d"));
+  assert.deepEqual(traces.map((t) => t.z), [[-5], [6]]);
+  assert.equal(traces[0].marker.color, "black");
+  assert.equal(traces[1].marker.color, "blue");
+  const actual = pcaTraces([{ channel: "A", pc1: 1, pc2: 2, pc3: 3, first_label: 2 }]);
   assert.equal(actual[0].name, "类 2");
+});
+
+test("PCA matrix payload preserves the third coordinate and channel identity", () => {
+  const rows = pcaRows({pca: {scores: [[1, 2, -3]], channels: ["A"], labels: [2]}});
+  assert.deepEqual(rows, [{channel: "A", pc1: 1, pc2: 2, pc3: -3, cluster: 2}]);
+  const trace = pcaTraces(rows)[0];
+  assert.deepEqual(trace.z, [-3]);
+  assert.deepEqual(trace.customdata, ["A"]);
+});
+
+test("PCA palette retains the native review's white outlined bad channels", () => {
+  const trace = pcaTraces([{channel: "bad", pc1: 1, pc2: 2, pc3: 3, cluster: -1}])[0];
+  assert.equal(trace.marker.color, "white");
+  assert.equal(trace.marker.line.color, "black");
+});
+
+test("3D PCA omits missing and invalid coordinates instead of inventing zeros", () => {
+  const valid = {channel: "zero", pc1: 0, pc2: 0, pc3: 0, first_label: 0};
+  const rows = [valid, {channel: "alias", PC1: 1, PC2: 2, PC3: -3, first_label: 1}];
+  for (const coordinate of ["pc1", "pc2", "pc3"])
+    for (const value of [null, undefined, NaN, Infinity, "", " ", "oops", false, [], {}])
+      rows.push({...valid, channel: "invalid", [coordinate]: value});
+  const traces = pcaTraces(rows);
+  assert.deepEqual(traces.flatMap((t) => t.customdata), ["zero", "alias"]);
+  assert.deepEqual(traces.map((t) => t.z), [[0], [-3]]);
 });
 
 test("review coordinates and classes stay bound to accepted FIRST model", () => {
@@ -293,6 +323,9 @@ async function browserChecks() {
       ".cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs",
     );
   const { chromium } = await import(pathToFileURL(modulePath));
+  const {default: pngjs} = await import(pathToFileURL(
+    process.env.PNGJS_MODULE || path.join(path.dirname(modulePath), "../pngjs/lib/png.js"),
+  ));
   const assets = path.resolve(
     fileURLToPath(
       new URL("../3-bands/fourband/browser_assets/", import.meta.url),
@@ -334,6 +367,7 @@ async function browserChecks() {
     first_label: i % 3,
     pc1: Math.sin(i * 1.7) * ((i % 3) + 1),
     pc2: Math.cos(i * 1.2) * ((i % 3) + 1),
+    pc3: Math.sin(i * .8) * ((i % 3) + 1),
   }));
   function later(fn) {
     const timer = setTimeout(() => {
@@ -577,6 +611,7 @@ async function browserChecks() {
       executablePath:
         process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ||
         "C:/Program Files/Google/Chrome/Application/chrome.exe",
+      args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
     });
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
@@ -657,6 +692,8 @@ async function browserChecks() {
       () =>
         document.getElementById("waveform-plot").data?.[0]?.y?.length === 500,
     );
+    assert.ok(await page.locator("#waveform-plot").evaluate(el =>
+      el.data.every(t => !t.type || t.type === "scatter")));
     await screenshot("desktop-qc-waveform");
     await page.setViewportSize({ width: 390, height: 844 });
     await screenshot("mobile-qc-waveform");
@@ -682,11 +719,38 @@ async function browserChecks() {
     await page.locator('#tab-results').click();
     await page.locator('#tab-review').click();
     await page.waitForFunction(()=>{const el=document.getElementById('pca-plot');return Math.abs(el._fullLayout.width-el.clientWidth)<2;});
+    assert.ok(await page.locator("#pca-plot").evaluate(el =>
+      el.data.every(t => t.type === "scatter3d" && t.z.length === t.x.length)));
+    const camera = () => page.locator("#pca-plot").evaluate(el =>
+      JSON.parse(JSON.stringify(el._fullLayout.scene.camera)));
+    const pcaPixels = async () => {
+      const image = pngjs.PNG.sync.read(await page.locator("#pca-plot canvas").first().screenshot());
+      let colored = 0;
+      for (let i = 0; i < image.data.length; i += 4) {
+        const [r, g, b] = image.data.subarray(i, i + 3);
+        if (Math.max(r, g, b) - Math.min(r, g, b) > 90) colored++;
+      }
+      assert.ok(colored > 100, "PCA canvas contains colored electrode pixels");
+    };
+    await pcaPixels();
+    const initialCamera = await camera();
+    const revision = await page.locator("#pca-plot").evaluate(el => el.layout.uirevision);
+    const box = await page.locator("#pca-plot").boundingBox();
+    await page.mouse.move(box.x + box.width * .5, box.y + box.height * .5);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * .65, box.y + box.height * .6, {steps: 12});
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+    const rotatedCamera = await camera();
+    assert.notDeepEqual(rotatedCamera.eye, initialCamera.eye, "Dragging rotates the PCA scene");
     assert.equal(await page.locator("#fit-second").isDisabled(), true);
     await page.locator("#second-k").fill("2");
     await page.locator("#bad-clusters").selectOption("1");
     await click("preview-review");
     await enabled("fit-second");
+    assert.deepEqual(await camera(), rotatedCamera, "Exclusion preview preserves camera");
+    assert.ok(await page.locator("#pca-plot").evaluate(el =>
+      el.data.some(t => t.marker.symbol === "x" && t.marker.color === "black")));
     assert.match(
       await page.locator("#preview-summary").textContent(),
       /剩余 16/,
@@ -694,6 +758,8 @@ async function browserChecks() {
     await screenshot("desktop-pca");
     await page.setViewportSize({ width: 390, height: 844 });
     await screenshot("mobile-pca");
+    await pcaPixels();
+    assert.ok(await page.locator("#pca-plot canvas").count() > 0);
     await layout();
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.locator("#second-k").fill("3");
@@ -718,6 +784,7 @@ async function browserChecks() {
       2,
     );
     await page.locator("#tab-review").click();
+    assert.deepEqual(await camera(), rotatedCamera, "Second fit does not change first-review camera");
     assert.deepEqual(
       await page
         .locator("#bad-clusters option")
@@ -731,6 +798,11 @@ async function browserChecks() {
           el.data.every((trace) => trace.x.every((x) => x < 10)),
         ),
     );
+    await page.locator("#tab-results").click();
+    await page.locator("#round").selectOption(state.first_round_id);
+    await page.locator("#tab-review").click();
+    await page.waitForFunction(() => document.querySelector("#pca-plot")?.data?.length);
+    assert.deepEqual(await camera(), rotatedCamera, "Changing selected round preserves first-review camera");
     await page.locator("#tab-results").click();
     assert.equal(
       await page.locator("#artifact-panel").getAttribute("open"),
@@ -748,6 +820,16 @@ async function browserChecks() {
     await page.locator("#tab-trials").click();
     await click("fit-first");
     await enabled("preview-review");
+    await page.locator("#tab-review").click();
+    await page.waitForFunction(old =>
+      document.getElementById("pca-plot").layout.uirevision !== old, revision);
+    assert.deepEqual(await camera(), initialCamera, "New first model resets the camera");
+    await screenshot("desktop-pca-reset");
+    await page.setViewportSize({width: 390, height: 844});
+    await screenshot("mobile-pca-reset");
+    await pcaPixels();
+    await layout();
+    await page.setViewportSize({width: 1440, height: 1000});
     await page.locator("#tab-results").click();
     const oldRound = state.rounds[0].id;
     await page.locator("#round").selectOption(oldRound);

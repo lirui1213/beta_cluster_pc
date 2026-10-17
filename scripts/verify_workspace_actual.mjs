@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {createRequire} from 'node:module';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import path from 'node:path';
+import {pcaRows, pcaTraces, reviewData} from '../3-bands/fourband/browser_assets/workspace_core.mjs';
 const require=createRequire(import.meta.url);
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'C:/Users/Administrator/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
+const {PNG}=require(process.env.PNGJS_MODULE || 'C:/Users/Administrator/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/pngjs');
 const base=process.env.BROWSER_URL;
 assert.ok(base,'Set BROWSER_URL');
 const output=process.env.BROWSER_ARTIFACTS || '3-bands/outputs/verification/workspace_actual';
@@ -16,6 +18,16 @@ page.on('pageerror',e=>errors.push(e.message));
 page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
 page.on('request',r=>{if(!r.url().startsWith(new URL(base).origin)&&!r.url().startsWith('data:')&&!r.url().startsWith('blob:'))external.push(r.url());});
 const report={};
+async function reviewPixels(){
+  const image=PNG.sync.read(await page.locator('#pca-plot canvas').first().screenshot());
+  let colored=0;
+  for(let i=0;i<image.data.length;i+=4){
+    const [r,g,b]=image.data.subarray(i,i+3);
+    if(Math.max(r,g,b)-Math.min(r,g,b)>90)colored++;
+  }
+  assert.ok(colored>100,'3D PCA canvas has colored electrode pixels');
+  return colored;
+}
 async function pixelCheck(frame){return frame.evaluate(()=>{
   const source=document.querySelector('#brain canvas'),copy=document.createElement('canvas');
   if(!source)return {colors:0,nonbackground:0};copy.width=source.width;copy.height=source.height;
@@ -43,9 +55,21 @@ try{
   await page.screenshot({path:path.join(output,'desktop.png'),fullPage:true});
   await page.locator('#tab-review').click();
   await page.waitForFunction(()=>document.querySelector('#pca-plot')?.data?.length);
+  const accepted=await (await page.request.get(base+'api/workspace/state')).json();
+  const expected=pcaTraces(pcaRows(reviewData(accepted))).map(t=>({x:t.x,y:t.y,z:t.z,channels:t.customdata}));
+  const actual=await page.locator('#pca-plot').evaluate(el=>el.data.map(t=>({type:t.type,x:t.x,y:t.y,z:t.z,channels:t.customdata})));
+  assert.ok(actual.every(t=>t.type==='scatter3d'));
+  assert.deepEqual(actual.map(({type,...t})=>t),expected,'All three plotted coordinates match accepted FIRST model');
+  report.reviewElectrodes=actual.reduce((n,t)=>n+t.x.length,0);
+  report.reviewDesktopPixels=await reviewPixels();
   report.reviewLabels=await page.locator('#bad-clusters option').allTextContents();
   assert.equal(report.reviewLabels.length,3,'Review must use first K=3, not displayed second K=2');
   await page.screenshot({path:path.join(output,'review.png'),fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  report.reviewMobilePixels=await reviewPixels();
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+  await page.screenshot({path:path.join(output,'review_mobile.png'),fullPage:true});
+  await page.setViewportSize({width:1600,height:1000});
   await page.locator('#tab-trials').click();
   assert.ok(await page.locator('#trial-grid [data-trial]').count()>100);
   await page.screenshot({path:path.join(output,'trials.png'),fullPage:true});
