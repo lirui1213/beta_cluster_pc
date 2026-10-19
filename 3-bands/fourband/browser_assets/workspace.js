@@ -18,10 +18,12 @@ import {
   configChanges,
   firstFitPayload,
 } from "./workspace_core.mjs";
+import { ArtifactPreview, isPreviewImage } from "./artifact_preview.js";
 
 const $ = (id) => document.getElementById(id);
 const api = new WorkspaceAPI(new URL(".", location.href).href),
   gate = new StateGate();
+const artifactPreview = new ArtifactPreview(api.base);
 let state = null,
   patients = [],
   selection = new TrialSelection(),
@@ -187,6 +189,7 @@ function resetReview() {
   plotKey = "";
 }
 function clearDisplays({keepReview = false} = {}) {
+  artifactPreview.setArtifacts([], "");
   for (const id of keepReview ? ["waveform-plot"] : ["pca-plot", "waveform-plot"]) {
     if (window.Plotly) window.Plotly.purge($(id));
     $(id).replaceChildren();
@@ -972,7 +975,8 @@ function renderResults() {
     );
   }
   const artifacts = state.artifacts ?? [];
-  const key = JSON.stringify([state.run_id, artifacts, url]);
+  artifactPreview.setArtifacts(artifacts, JSON.stringify([state.run_id, state.selected_round]));
+  const key = JSON.stringify([state.run_id, state.selected_round, artifacts, url]);
   if ($("artifacts").dataset.key === key) return;
   $("artifacts").dataset.key = key;
   $("artifacts").replaceChildren();
@@ -985,18 +989,28 @@ function renderResults() {
           `api/workspace/artifact/${encodeURIComponent(artifact.id)}`,
           api.base,
         ),
-        link = document.createElement("a");
-      link.href = href;
+        image = isPreviewImage(artifact),
+        link = document.createElement(image ? "button" : "a");
       link.textContent = artifact.label ?? artifact.id;
-      link.download = artifact.label ?? "";
-      if (!url && artifact.content_type === "image/png") {
+      if (image) {
+        link.type = "button";
+        link.className = "artifact-trigger";
+        link.setAttribute("aria-label", `预览 ${artifact.label ?? artifact.id}`);
+        link.setAttribute("aria-haspopup", "dialog");
+        link.title = "预览图像";
+        link.onclick = () => artifactPreview.open(artifact.id, link);
+      } else {
+        link.href = href;
+        link.download = artifact.label ?? "";
+      }
+      if (!url && image) {
         const figure = document.createElement("figure"),
-          img = document.createElement("img"),
-          caption = document.createElement("figcaption");
+          img = document.createElement("img");
         img.src = href;
+        img.loading = "lazy";
         img.alt = artifact.label ?? "已保存图像";
-        caption.append(link);
-        figure.append(img, caption);
+        link.prepend(img);
+        figure.append(link);
         $("artifacts").append(figure);
       } else $("artifacts").append(link);
     } catch (e) {

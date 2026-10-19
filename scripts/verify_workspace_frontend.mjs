@@ -462,6 +462,10 @@ async function browserChecks() {
       state.explorer_url = `explorer/${id}/`;
       state.artifacts = [
         { id: "figure", label: "PCA.png", content_type: "image/png" },
+        { id: "curves", label: "Curves <beta>.png", content_type: "image/png" },
+        { id: "broken", label: "Broken.png", content_type: "image/png" },
+        { id: "table", label: "features.csv", content_type: "text/csv" },
+        { id: "metadata", label: "settings.json", content_type: "application/json" },
       ];
     }
     if (action === "preview_review")
@@ -596,14 +600,23 @@ async function browserChecks() {
           });
           result = state;
         } else if (action === "close") result = { state: "closed" };
-        else if (action === "artifact/figure") {
+        else if (["artifact/figure", "artifact/curves"].includes(action)) {
           res.setHeader("Content-Type", "image/png");
-          res.end(
-            Buffer.from(
-              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==",
-              "base64",
-            ),
-          );
+          const bitmap = new pngjs.PNG({width: 1000, height: 600});
+          for (let y = 0; y < bitmap.height; y++) for (let x = 0; x < bitmap.width; x++) {
+            const i = (y * bitmap.width + x) * 4;
+            const curve = Math.abs(y - (300 + 120 * Math.sin(x / 90))) < 3;
+            bitmap.data.set(curve ? [20,108,117,255] : [248,250,251,255], i);
+          }
+          res.end(pngjs.PNG.sync.write(bitmap));
+          return;
+        } else if (action === "artifact/broken") {
+          res.setHeader("Content-Type", "image/png");
+          res.end("invalid image");
+          return;
+        } else if (["artifact/table", "artifact/metadata"].includes(action)) {
+          res.setHeader("Content-Type", action.endsWith("table") ? "text/csv" : "application/json");
+          res.end(action.endsWith("table") ? "channel,label\nA1,1" : "{}");
           return;
         } else throw new Error(`Unknown fixture API ${route}`);
         res.end(JSON.stringify(result));
@@ -656,6 +669,8 @@ async function browserChecks() {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
     });
+    const downloads = [];
+    page.on("download", item => downloads.push(item.suggestedFilename()));
     page.on("pageerror", (e) => errors.push(e.message));
     page.on("request", (req) => {
       if (
@@ -914,8 +929,74 @@ async function browserChecks() {
     );
     assert.equal(
       await page.locator("#artifacts-summary").textContent(),
-      "导出文件 (1)",
+      "导出文件 (5)",
     );
+    await page.locator("#artifacts-summary").click();
+    await page.getByRole("button", {name: "预览 PCA.png", exact: true}).click({timeout: 3000});
+    await page.waitForFunction(() => document.querySelector("#artifact-image")?.naturalWidth === 1000);
+    assert.equal(downloads.length, 0, "Image preview must not download");
+    assert.equal(await page.locator("#artifact-preview").isVisible(), true);
+    assert.equal(await page.locator("#artifact-prev").isDisabled(), true);
+    const fitWidth = await page.locator("#artifact-image").evaluate(el => el.clientWidth);
+    await click("artifact-zoom-in");
+    assert.ok(await page.locator("#artifact-image").evaluate(el => el.clientWidth) > fitWidth);
+    const zoomedWidth = await page.locator("#artifact-image").evaluate(el => el.clientWidth);
+    await page.waitForTimeout(1400);
+    assert.equal(await page.locator("#artifact-image").evaluate(el => el.clientWidth), zoomedWidth, "Polling retains preview zoom");
+    await click("artifact-fit");
+    await click("artifact-next");
+    await page.waitForFunction(() => document.querySelector("#artifact-title").textContent === "Curves <beta>.png");
+    await page.waitForFunction(() => document.querySelector("#artifact-image")?.naturalWidth === 1000);
+    await screenshot("desktop-image-preview");
+    const download = page.waitForEvent("download");
+    await page.locator("#artifact-download").click();
+    assert.equal((await download).suggestedFilename(), "Curves _beta_.png");
+    await click("artifact-next");
+    await page.waitForFunction(() => document.querySelector("#artifact-image-status").textContent.includes("加载失败"));
+    await page.keyboard.press("ArrowLeft");
+    await page.waitForFunction(() => document.querySelector("#artifact-image")?.naturalWidth === 1000);
+    await page.setViewportSize({width:390,height:844});
+    await screenshot("mobile-image-preview");
+    assert.equal(await page.locator("#artifact-preview").evaluate(el => el.scrollWidth > el.clientWidth), false);
+    assert.equal(await page.locator("#artifact-preview").evaluate(el => {
+      const r = el.getBoundingClientRect();
+      return r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth;
+    }), true, "Preview remains inside the mobile viewport");
+    await page.setViewportSize({width:320,height:568});
+    assert.equal(await page.locator("#artifact-preview").evaluate(el => el.scrollWidth > el.clientWidth), false);
+    await page.locator("#artifact-download").scrollIntoViewIfNeeded();
+    await page.setViewportSize({width:390,height:844});
+    await layout();
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#artifact-preview").isVisible(), false);
+    assert.equal(await page.getByRole("button", {name:"预览 PCA.png", exact:true}).evaluate(el => el === document.activeElement), true);
+    for (const name of ["features.csv", "settings.json"]) {
+      const direct = page.waitForEvent("download");
+      await page.getByRole("link", {name, exact:true}).click();
+      assert.equal((await direct).suggestedFilename(), name);
+    }
+    await page.setViewportSize({width:1440,height:1000});
+    await page.getByRole("button", {name:"预览 PCA.png", exact:true}).click();
+    // A server-side round change must invalidate the modal, even during polling.
+    state.selected_round = state.second_round_id;
+    state.explorer_url = `explorer/${state.second_round_id}/`;
+    state.revision++;
+    await page.waitForFunction(() => !document.querySelector("#artifact-preview").open);
+    state.explorer_url = null;
+    state.revision++;
+    await page.waitForSelector("#artifacts figure button");
+    await page.locator("#artifacts figure button").first().click();
+    await page.waitForFunction(() => document.querySelector("#artifact-image")?.naturalWidth === 1000);
+    const oldArtifacts = state.artifacts;
+    state.artifacts = state.artifacts.filter(item => item.id !== "figure");
+    state.revision++;
+    await page.waitForFunction(() => !document.querySelector("#artifact-preview").open);
+    assert.equal(await page.locator("#artifact-download").getAttribute("href"), null);
+    state.artifacts = oldArtifacts;
+    state.explorer_url = `explorer/${state.selected_round}/`;
+    state.revision++;
+    await page.waitForFunction(() => document.querySelector("#artifacts-summary").textContent === "导出文件 (5)");
+    assert.equal(downloads.length, 3, "Only explicit image/CSV/JSON downloads occur");
     await screenshot("desktop-results");
     await page.setViewportSize({ width: 390, height: 844 });
     await screenshot("mobile-results");
