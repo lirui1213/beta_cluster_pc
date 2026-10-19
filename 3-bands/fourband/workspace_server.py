@@ -53,6 +53,8 @@ def make_workspace_server(session, *, token=None, assets_dir=None):
                 self.send(200, dict(patients=session.catalog.patients()))
             elif route == "api/workspace/state":
                 self.send(200, session.state())
+            elif route == "api/workspace/current":
+                self.send(200, dict(analysis=session.current(query.get("subject", [None])[0], query.get("block", [None])[0])))
             elif route == "api/workspace/history":
                 self.send(200, dict(runs=session.catalog.history(query.get("subject", [None])[0], query.get("block", [None])[0])))
             elif route == "api/workspace/inputs":

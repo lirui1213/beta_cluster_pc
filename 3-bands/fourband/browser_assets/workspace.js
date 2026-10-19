@@ -39,8 +39,12 @@ let previewBinding = null,
   plotKey = "",
   waveKey = "",
   gridKey = "",
-  historyKey = "",
   activePane = "settings";
+let replaceRunId = null,
+  analysisReady = false,
+  contextLoading = false,
+  chosenContext = null,
+  resolveChoice = null;
 let acceptedConfig = null,
   submittedFitConfig = null,
   lastIdentity = "",
@@ -218,69 +222,101 @@ function resetContext() {
   submittedFitConfig=null;
   inputsReady = false;
   inputsData = null;
+  replaceRunId = null;
+  analysisReady = false;
   error("");
   $("baseline-segments").value = "";
   render();
 }
 async function permitSwitch() {
+  if (contextLoading) return false;
   if (!isBusy(state) && !pending) return true;
   if (pending) return false;
   if (!window.confirm("当前任务仍在运行。取消任务并切换？")) return false;
   await mutate("cancel", api.identity(state));
   return true;
 }
-async function loadContext() {
-  const token = gate.generation,
-    c = context();
-  inputsReady = false;
-  render();
-  const results = await Promise.allSettled([
-    api.get("inputs", c),
-    api.get("history", c),
-  ]);
-  if (token !== gate.generation) return;
-  const [input, history] = results;
-  if (input.status === "fulfilled") {
-    inputsData = input.value;
-    inputsReady = true;
-    renderInputs();
-  } else {
-    inputsData = null;
-    text("inputs", input.reason.message);
-    error(input.reason);
-  }
-  if (input.status === "fulfilled") {
-    const options = input.value.selection_options?.baseline_segments_csv ?? [],
-      keep = $("baseline-segments").value;
-    $("baseline-segments").replaceChildren(
-      option("", "不使用片段表"),
-      ...options.map((v) => option(v.id, v.label ?? v.id)),
-    );
-    if (options.some((v) => v.id === keep)) $("baseline-segments").value = keep;
-    $("baseline-segments-label").hidden = !options.length;
-  }
-  if (history.status === "fulfilled") renderHistory(history.value.runs || []);
-  else error(history.reason);
-  render();
+function chooseAnalysis(analysis) {
+  text("analysis-summary", `${analysis.subject} / ${analysis.block}\n${stages[analysis.stage] ?? analysis.stage} · ${analysis.id}\n${analysis.created_at ?? ""}`);
+  return new Promise((resolve) => {
+    resolveChoice = resolve;
+    $("analysis-dialog").showModal();
+  });
 }
-function renderHistory(runs) {
-  const value = $("history").value;
-  $("history").replaceChildren(option("", "新分析"));
-  for (const run of runs) {
-    const id = run.run_id ?? run.id ?? run.name;
-    if (!id) continue;
-    $("history").append(
-      option(
-        id,
-        `${run.read_only || run.legacy ? "[只读] " : ""}${run.label ?? id}${run.stage ? " · " + (stages[run.stage] ?? run.stage) : ""}`,
-      ),
-    );
+function finishChoice(choice) {
+  $("analysis-dialog").close();
+  resolveChoice?.(choice);
+  resolveChoice = null;
+}
+function restoreContext(previous) {
+  if (!previous) return;
+  $("subject").value = previous.subject;
+  fillBlocks(previous.block);
+}
+async function loadContext({ choose = false, previous = null } = {}) {
+  const token = gate.generation,
+    c = context(),
+    focusTarget = choose ? document.activeElement : null;
+  let switched = false;
+  contextLoading = true;
+  render();
+  try {
+    const [input, current] = await Promise.allSettled([
+      api.get("inputs", c),
+      api.get("current", c),
+    ]);
+    if (token !== gate.generation) return;
+    if (current.status !== "fulfilled") throw current.reason;
+    const analysis = current.value.analysis;
+    const choice = choose ? (analysis ? await chooseAnalysis(analysis) : "new") : null;
+    if (choose && choice === "cancel") {
+      restoreContext(previous);
+      return;
+    }
+    if (choose) {
+      resetContext();
+      switched = true;
+      hydrate(DEFAULT_CONFIG);
+      pane("settings");
+      replaceRunId = choice === "new" ? (analysis?.id ?? null) : null;
+      analysisReady = true;
+    }
+    chosenContext = c;
+    if (input.status === "fulfilled") {
+      inputsData = input.value;
+      inputsReady = true;
+      renderInputs();
+      const options = input.value.selection_options?.baseline_segments_csv ?? [],
+        keep = $("baseline-segments").value;
+      $("baseline-segments").replaceChildren(
+        option("", "不使用片段表"),
+        ...options.map((v) => option(v.id, v.label ?? v.id)),
+      );
+      if (options.some((v) => v.id === keep)) $("baseline-segments").value = keep;
+      $("baseline-segments-label").hidden = !options.length;
+    } else {
+      inputsReady = false;
+      inputsData = null;
+      text("inputs", input.reason.message);
+      error(input.reason);
+    }
+    if (choice === "continue") {
+      const next = await mutate("open", { ...c, run_id: analysis.run_id ?? analysis.id });
+      if (next) {
+        apply(next, gate.generation, { hydrateConfig: true });
+        pane(["first_ready", "second_ready"].includes(next.stage) ? "results" : "trials");
+      }
+    }
+  } catch (e) {
+    if (switched) analysisReady = false;
+    else restoreContext(previous);
+    error(e);
+  } finally {
+    contextLoading = false;
+    render();
+    if (focusTarget && focusTarget !== document.body && !focusTarget.disabled)
+      focusTarget.focus();
   }
-  $("history").value = [...$("history").options].some(
-    (o) => o.value === state?.run_id,
-  )
-    ? state.run_id
-    : value;
 }
 function renderInputs() {
   if (!inputsData) return;
@@ -420,9 +456,9 @@ async function poll() {
   if (closed) return;
   const token = gate.generation;
   try {
-    if (pending || gate.detached) return;
+    if (pending || contextLoading || gate.detached) return;
     const next = await api.get("state");
-    if (token === gate.generation) {
+    if (token === gate.generation && !contextLoading) {
       text("connection", "已连接");
       apply(next, token);
     }
@@ -471,7 +507,7 @@ function handle(fn) {
 }
 
 function render() {
-  const busy = isBusy(state) || pending;
+  const busy = isBusy(state) || pending || contextLoading;
   const dirty = extractionDirty || fitDirty || qcDirty || trialDirty;
   const historical = state && !currentRound(state);
   text(
@@ -488,12 +524,17 @@ function render() {
   );
   text("run-id", state?.run_id ?? "");
   text("log-tail", state?.task?.log_tail ?? "");
+  text("retention-warning", state?.retention_warning ?? "");
+  $("retention-warning").hidden = !state?.retention_warning;
   if (state?.task?.error) error(state.task.error);
   $("cancel").disabled = !isBusy(state) || pending;
-  $("start").disabled = busy || !context().block || !validInputs();
-  $("close").disabled = pending;
-  $("refresh").disabled = pending;
-  for (const id of ["subject", "block", "history"]) $(id).disabled = pending;
+  $("start").disabled = busy || Boolean(state?.run_id) || !analysisReady || !context().block || !validInputs();
+  $("close").disabled = pending || contextLoading;
+  $("refresh").disabled = pending || contextLoading;
+  for (const id of ["subject", "block", "current-analysis"]) $(id).disabled = pending || contextLoading;
+  $("current-analysis").disabled ||= !context().block;
+  text("current-analysis-label", state?.run_id ? "当前分析 · " + (stages[state.stage] ?? state.stage) :
+    analysisReady ? (replaceRunId ? "新分析 · 待替换" : "新分析") : "选择当前分析");
   for (const button of document.querySelectorAll("[data-action]")) {
     let enabled =
       canAction(state, button.dataset.action, {
@@ -501,7 +542,7 @@ function render() {
         fitDirty,
         qcDirty,
         trialDirty,
-      }) && !pending;
+      }) && !pending && !contextLoading;
     if (
       ["confirm_trials", "fit_first"].includes(button.dataset.action) &&
       qcDirty
@@ -576,20 +617,6 @@ function render() {
   renderReview();
   renderWaveform();
   renderResults();
-  if (
-    state &&
-    historyKey !== `${state.run_id}:${state.rounds?.length}` &&
-    !busy
-  ) {
-    historyKey = `${state.run_id}:${state.rounds?.length}`;
-    const token = gate.generation;
-    api
-      .get("history", context())
-      .then((result) => {
-        if (token === gate.generation) renderHistory(result.runs || []);
-      })
-      .catch((e) => error(e));
-  }
   if (dirty && activePane === "results")
     text(
       "result-identity",
@@ -1000,50 +1027,50 @@ document
 $("subject").addEventListener(
   "change",
   handle(async () => {
-    const old = state?.subject;
+    const old = chosenContext;
     if (!(await permitSwitch())) {
-      if (old) $("subject").value = old;
+      restoreContext(old);
       return;
     }
     fillBlocks();
-    resetContext();
-    pane("settings");
-    await loadContext();
+    await loadContext({ choose: true, previous: old });
   }),
 );
 $("block").addEventListener(
   "change",
   handle(async () => {
-    const old = state?.block;
+    const old = chosenContext;
     if (!(await permitSwitch())) {
-      if (old) $("block").value = old;
+      restoreContext(old);
       return;
     }
-    resetContext();
-    pane("settings");
-    await loadContext();
+    await loadContext({ choose: true, previous: old });
   }),
 );
-$("history").addEventListener(
-  "change",
+$("current-analysis").addEventListener(
+  "click",
   handle(async () => {
-    const id = $("history").value;
-    if (!(await permitSwitch())) {
-      $("history").value = state?.run_id ?? "";
-      return;
-    }
-    const c = context();
-    resetContext();
-    await loadContext();
-    if (id) {
-      const next = await mutate("open", { ...c, run_id: id });
-      if (next) {
-        apply(next, gate.generation, { hydrateConfig: true });
-        pane("results");
-      }
-    } else pane("settings");
+    if (!(await permitSwitch())) return;
+    await loadContext({ choose: true, previous: chosenContext });
   }),
 );
+for (const [id, choice] of [["analysis-continue", "continue"], ["analysis-new", "new"], ["analysis-cancel", "cancel"]])
+  $(id).addEventListener("click", () => finishChoice(choice));
+$("analysis-dialog").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  finishChoice("cancel");
+});
+$("analysis-dialog").addEventListener("keydown", (event) => {
+  if (event.key !== "Tab") return;
+  const first = $("analysis-continue"), last = $("analysis-cancel");
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
 $("round").addEventListener(
   "change",
   handle(async () => {
@@ -1106,12 +1133,12 @@ $("start").addEventListener(
   "click",
   handle(async () => {
     const effective = config();
-    if (state?.run_id && !window.confirm("使用当前设置创建新分析并开始提取？"))
-      return;
+    if (state?.run_id || !analysisReady || contextLoading) return;
     const segment = $("baseline-segments").value;
     const next = await mutate("start", {
       ...context(),
       config: effective,
+      replace_run_id: replaceRunId,
       ...(segment ? { selections: { baseline_segments_csv: segment } } : {}),
     });
     if (next) {
@@ -1278,6 +1305,7 @@ async function boot() {
     if (initial.subject && patients.some((p) => p.id === initial.subject))
       $("subject").value = initial.subject;
     fillBlocks(initial.block);
+    chosenContext = context();
     hydrate(initial.config);
     if (initial.run_id) {
       apply(initial, gate.generation, { hydrateConfig: true });
@@ -1286,8 +1314,8 @@ async function boot() {
           ? "results"
           : "trials",
       );
-    }
-    await loadContext();
+    } else gate.detach();
+    await loadContext({ choose: !initial.run_id });
     text("connection", "已连接");
   } catch (e) {
     error(e);

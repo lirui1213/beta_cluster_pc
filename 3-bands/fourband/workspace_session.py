@@ -1,4 +1,4 @@
-"""Server-authoritative run revisions, explicit review gates and durable history."""
+"""Explicit review gates and one resumable browser analysis per context."""
 from datetime import datetime
 import json
 import mimetypes
@@ -9,6 +9,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from .workspace_task import WorkspaceTask, atomic_json
+from .workspace_retention import WorkspaceRetention
 
 
 _READ_ONLY = {"waveform", "preview_review", "stability"}
@@ -33,6 +34,19 @@ def _identifier(value):
     return value
 
 
+def _task_tail(task):
+    tails = []
+    for name in ("stdout.log", "stderr.log"):
+        try:
+            with (task.directory / name).open("rb") as stream:
+                stream.seek(0, 2)
+                stream.seek(max(0, stream.tell() - 5000))
+                tails.append(stream.read().decode("utf-8", errors="replace"))
+        except OSError:
+            pass
+    return "\n".join(tails)[-10000:]
+
+
 class WorkspaceSession:
     def __init__(self, catalog, *, task_factory=WorkspaceTask, config_validator=None):
         if config_validator is None:
@@ -49,10 +63,15 @@ class WorkspaceSession:
         self._explorer_id = None
         self._load_generation = 0
         self._loader_task = None
+        self._loader_start_lock = threading.Lock()
         self._loader_thread = None
         self._loading_cancel = threading.Event()
         self._retirements = set()
         self._artifacts = {}
+        self.retention = WorkspaceRetention(catalog.output_root)
+        self._lease = None
+        self._cleanup_requested = False
+        self._cleanup_retry = 0.
         self.closing = False
         self._stop = threading.Event()
         self._monitor = threading.Thread(target=self._watch, daemon=True, name="analysis-task-monitor")
@@ -75,6 +94,63 @@ class WorkspaceSession:
             manifest = dict(self._state, data={}, state_data_file=filename,
                 rounds=[{key: value for key, value in item.items() if key != "data"} for item in self._state["rounds"]])
             atomic_json(self.run_dir / "workspace_manifest.json", manifest)
+            self._cleanup_requested = True
+
+    def current(self, subject, block):
+        resolver = getattr(self.catalog, "context", self.catalog.resolve)
+        resolver(subject, block)
+        return self.retention.current(subject, block)
+
+    def _use_context(self, subject, block, *, lease=None):
+        parent = self.retention.parent(subject, block)
+        if self._lease is not None and self._lease.path.parent == parent:
+            return
+        lease = lease or self.retention.lease(subject, block)
+        if self._lease is not None:
+            self._retire_explorer()
+            if not all(event.wait(20) for event in tuple(self._retirements)):
+                lease.close()
+                raise ValueError("Previous display is still closing; retry the context switch.")
+            self._lease.close()
+        self._lease = lease
+
+    def _compact(self):
+        current = {self._state.get("first_round_id"), self._state.get("second_round_id")} - {None}
+        self._state["rounds"] = [record for record in self._state["rounds"] if record["id"] in current]
+        keep = set(self._state.get("shared_artifacts", []))
+        for record in self._state["rounds"]:
+            keep.update(record.get("artifacts", []))
+            keep.update(record.get("shared_artifacts", []))
+            keep.update(record.get("extra_artifacts", []))
+            root = record.get("artifact_root") or record.get("data", {}).get("round_dir")
+            if root:
+                keep.update(key for key, path in self._artifacts.items() if path.is_relative_to(Path(root)))
+        self._artifacts = {key: path for key, path in self._artifacts.items() if key in keep}
+        self._state["artifact_paths"] = {key: str(path.relative_to(self.run_dir)) for key, path in self._artifacts.items()}
+
+    def _collect_if_idle(self):
+        if (not self._cleanup_requested or self.run_dir is None or self._state.get("read_only")
+                or self._state.get("retention_pending") or self._busy()
+                or (self._loader_thread is not None and self._loader_thread.is_alive())
+                or time.monotonic() < self._cleanup_retry):
+            return
+        try:
+            self.retention.collect(self.run_dir)
+            self.retention.consolidate(self.run_dir)
+            self._state.pop("retention_warning", None)
+            self._cleanup_requested = False
+        except (OSError, ValueError) as error:
+            self._state["retention_warning"] = f"Browser cache cleanup pending: {error}"
+            self._cleanup_retry = time.monotonic() + 5
+
+    def _discard_staging(self):
+        if self.run_dir is not None and self._state.get("retention_pending"):
+            try:
+                self.retention.remove(self.run_dir)
+            except (OSError, ValueError) as error:
+                self._state["retention_warning"] = f"Temporary browser cache cleanup pending: {error}"
+            else:
+                self.run_dir = None
 
     def _busy(self, *, include_retirement=True):
         task = self._state.get("task") or {}
@@ -102,16 +178,7 @@ class WorkspaceSession:
                     task["stage"] = json.loads((directory / "progress.json").read_text(encoding="utf-8")).get("stage", task["action"])
                 except (OSError, ValueError):
                     pass
-                tails = []
-                for name in ("stdout.log", "stderr.log"):
-                    try:
-                        with (directory / name).open("rb") as stream:
-                            stream.seek(0, 2)
-                            stream.seek(max(0, stream.tell() - 5000))
-                            tails.append(stream.read().decode("utf-8", errors="replace"))
-                    except OSError:
-                        pass
-                task["log_tail"] = "\n".join(tails)[-10000:]
+                task["log_tail"] = _task_tail(self._task)
             if self._explorer_id is not None:
                 response["explorer_url"] = f"explorer/{self._explorer_id}/"
             response["artifacts"] = [{"id": key, "label": path.name,
@@ -136,11 +203,19 @@ class WorkspaceSession:
         with self._lock:
             if self.closing or self._busy():
                 raise ValueError("Workspace is closing or a numerical task is running.")
-            if not isinstance(body, dict) or set(body) - {"subject", "block", "config", "selections"}:
+            if not isinstance(body, dict) or set(body) - {"subject", "block", "config", "selections", "replace_run_id"}:
                 raise ValueError("Invalid start request.")
             resolved = self.catalog.resolve(body.get("subject"), body.get("block"), body.get("selections"))
             config = self.config_validator(body.get("config", {}), resolved)
+            current = self.retention.current(resolved["subject"], resolved["block"])
+            if body.get("replace_run_id") != (current["run_id"] if current else None):
+                raise ValueError("Current analysis changed; refresh and explicitly choose New to replace it.")
+            self._use_context(resolved["subject"], resolved["block"])
+            current = self.retention.current(resolved["subject"], resolved["block"])
+            if body.get("replace_run_id") != (current["run_id"] if current else None):
+                raise ValueError("Current analysis changed; refresh and explicitly choose New to replace it.")
             self._retire_explorer()
+            self.retention.discard_pending(resolved["subject"], resolved["block"])
             identifier = _timestamp() + "_web_" + secrets.token_hex(3)
             root = Path(self.catalog.output_root).resolve()
             self.run_dir = (root / resolved["subject"] / resolved["block"] / identifier).resolve()
@@ -151,8 +226,14 @@ class WorkspaceSession:
             self._artifacts = {}
             self._state = dict(schema_version=1, run_id=identifier, revision=0, stage="configured",
                 subject=resolved["subject"], block=resolved["block"], config=config, task=None,
-                data={}, rounds=[], created_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat())
-            self._launch("extract", {}, allow_retirement=True)
+                data={}, rounds=[], retention_pending=True,
+                created_at=datetime.now(ZoneInfo("Asia/Shanghai")).isoformat())
+            self._save()
+            try:
+                self._launch("extract", {}, allow_retirement=True)
+            except Exception:
+                self._discard_staging()
+                raise
             return self.state()
 
     def action(self, body):
@@ -178,10 +259,14 @@ class WorkspaceSession:
     def refresh(self):
         with self._lock:
             task = self._task
-            if task is None or self._state["task"]["status"] == "cancelling" or task.poll() is None:
+            if task is None:
+                self._collect_if_idle()
+                return
+            if self._state["task"]["status"] == "cancelling" or task.poll() is None:
                 return
             action = self._state["task"]["action"]
             before_state = json.loads(json.dumps(self._state))
+            before_state["task"]["log_tail"] = _task_tail(task)
             before_artifacts = dict(self._artifacts)
             try:
                 result = task.read_result()
@@ -204,7 +289,7 @@ class WorkspaceSession:
                 data = result.get("data", {})
                 if result.get("numerical_state_dir"):
                     numerical = Path(result["numerical_state_dir"]).resolve()
-                    if not numerical.is_relative_to(self.run_dir.resolve()):
+                    if not numerical.is_relative_to(self.run_dir.resolve()) or not numerical.is_dir():
                         raise ValueError("Worker returned a numerical state outside the current run.")
                     self._state["numerical_state_dir"] = str(numerical)
                 self._state["data"].update(data)
@@ -243,6 +328,9 @@ class WorkspaceSession:
                         self._state["second_round_id"] = round_id
                     if request:
                         self._queue_attach(request)
+                if action == "extract":
+                    self._state["retention_pending"] = False
+                self._compact()
                 self._state["revision"] += 1
                 self._save()
             except Exception as error:
@@ -259,6 +347,9 @@ class WorkspaceSession:
             finally:
                 task.close()
                 self._task = None
+                if action == "extract" and self._state.get("retention_pending"):
+                    self._discard_staging()
+                self._collect_if_idle()
 
     def _validate_artifacts(self, artifacts):
         if isinstance(artifacts, dict):
@@ -329,13 +420,18 @@ class WorkspaceSession:
         if not path.is_relative_to(self.run_dir.resolve()) or path.name != "request.joblib" or not path.is_file():
             raise ValueError("Display snapshot is not a trusted run artifact.")
         directory = self.run_dir / "workspace_tasks" / (_timestamp() + "_display_" + secrets.token_hex(3))
-        task = WorkspaceTask(directory, self.run_dir, "prepare_display", {"request_path": str(path)})
-        with self._lock:
-            self._loader_task = task
+        with self._loader_start_lock:
+            if self.closing or self._loading_cancel.is_set():
+                raise ValueError("Display loading cancelled.")
+            task = WorkspaceTask(directory, self.run_dir, "prepare_display", {"request_path": str(path)})
+            with self._lock:
+                self._loader_task = task
         try:
             while task.poll() is None:
                 if self._loading_cancel.wait(.1):
                     raise ValueError("Display loading cancelled.")
+            if self.closing or self._loading_cancel.is_set():
+                raise ValueError("Display loading cancelled.")
             prepared = task.read_result()
             if prepared.get("error"):
                 raise ValueError(prepared["error"])
@@ -381,6 +477,7 @@ class WorkspaceSession:
                     elapsed_seconds=round(time.monotonic() - started, 1))
                 self._state["revision"] += 1
                 self._save()
+                self._collect_if_idle()
 
         self._loader_thread = threading.Thread(target=load, daemon=True, name="analysis-anatomy-load")
         self._loader_thread.start()
@@ -405,6 +502,9 @@ class WorkspaceSession:
                 self._state["task"].update(status="cancelled", elapsed_seconds=round(time.monotonic() - self._started, 1))
                 self._state["revision"] += 1
                 self._save()
+                if self._state.get("retention_pending"):
+                    self._discard_staging()
+                self._collect_if_idle()
         else:
             with self._lock:
                 if (self._state.get("task") or {}).get("status") != "opening":
@@ -436,35 +536,59 @@ class WorkspaceSession:
             manifest = directory / "workspace_manifest.json"
             if not manifest.is_file():
                 return self._open_legacy(directory, resolved, body.get("round_id"))
-            state = json.loads(manifest.read_text(encoding="utf-8"))
-            if (state.get("schema_version") != 1 or state.get("subject") != resolved["subject"]
-                    or state.get("block") != resolved["block"] or state.get("run_id") != directory.name):
-                raise ValueError("Unsupported or mismatched saved-run manifest.")
-            identifier = body.get("round_id") or state.get("selected_round")
-            if identifier and not any(item.get("id") == identifier for item in state.get("rounds", [])):
-                raise ValueError("Unknown saved round.")
-            if state.get("state_data_file"):
-                data_path = (directory / _identifier(state["state_data_file"])).resolve()
-                if not data_path.is_relative_to(directory) or data_path.stat().st_size > 32 * 1024**2:
-                    raise ValueError("Saved analysis metadata is outside the run or too large.")
-                saved_data = json.loads(data_path.read_text(encoding="utf-8"))
-                state["data"] = saved_data["data"]
-                for record in state["rounds"]:
-                    record["data"] = saved_data.get("round_data", {}).get(record["id"], {})
-            self._retire_explorer()
-            self.run_dir, self._state = directory, state
-            self._state["revision"] += 1
-            if self._state.get("task") and self._state["task"]["status"] in {"running", "opening"}:
-                self._state["task"].update(status="interrupted", error="Service stopped before this action completed.")
-            self._artifacts = {}
-            for key, relative in state.get("artifact_paths", {}).items():
-                path = (directory / relative).resolve()
-                if path.is_relative_to(directory) and path.is_file():
-                    self._artifacts[key] = path
-            if identifier:
-                self._select_round(identifier)
-            self._save()
-            return self.state()
+            parent = self.retention.parent(resolved["subject"], resolved["block"])
+            lease = (self._lease if self._lease is not None and self._lease.path.parent == parent
+                     else self.retention.lease(resolved["subject"], resolved["block"]))
+            try:
+                managed = self.retention.owns(directory)
+                return self._open_workspace(body, directory, resolved, managed, lease)
+            finally:
+                if lease is not None and lease is not self._lease:
+                    lease.close()
+
+    def _open_workspace(self, body, directory, resolved, managed, lease):
+        # All mutable manifest/data reads happen while owning the context.
+        if managed:
+            current = self.retention.current(resolved["subject"], resolved["block"])
+            if current is None or current["run_id"] != directory.name:
+                raise ValueError("Only the current browser analysis can be continued; refresh the selection.")
+        manifest = directory / "workspace_manifest.json"
+        state = json.loads(manifest.read_text(encoding="utf-8"))
+        if (state.get("schema_version") != 1 or state.get("subject") != resolved["subject"]
+                or state.get("block") != resolved["block"] or state.get("run_id") != directory.name):
+            raise ValueError("Unsupported or mismatched saved-run manifest.")
+        identifier = body.get("round_id") or state.get("selected_round")
+        if identifier and not any(item.get("id") == identifier for item in state.get("rounds", [])):
+            raise ValueError("Unknown saved round.")
+        if state.get("state_data_file"):
+            data_path = (directory / _identifier(state["state_data_file"])).resolve()
+            if not data_path.is_relative_to(directory) or data_path.stat().st_size > 32 * 1024**2:
+                raise ValueError("Saved analysis metadata is outside the run or too large.")
+            saved_data = json.loads(data_path.read_text(encoding="utf-8"))
+            state["data"] = saved_data["data"]
+            for record in state["rounds"]:
+                record["data"] = saved_data.get("round_data", {}).get(record["id"], {})
+        self._use_context(resolved["subject"], resolved["block"], lease=lease)
+        self._retire_explorer()
+        self.run_dir, self._state = directory, state
+        self._state["revision"] += 1
+        if self._state.get("task") and self._state["task"]["status"] in {"running", "opening"}:
+            self._state["task"].update(status="interrupted", error="Service stopped before this action completed.")
+        self._artifacts = {}
+        for key, relative in state.get("artifact_paths", {}).items():
+            path = (directory / relative).resolve()
+            if path.is_relative_to(directory) and path.is_file():
+                self._artifacts[key] = path
+        if managed:
+            self._compact()
+            if identifier not in {self._state.get("first_round_id"), self._state.get("second_round_id")}:
+                identifier = self._state.get("second_round_id") or self._state.get("first_round_id")
+        if identifier:
+            self._select_round(identifier)
+        self._save()
+        if managed:
+            self._collect_if_idle()
+        return self.state()
 
     def _open_legacy(self, directory, resolved, round_id):
         config_path = directory / "run_config.json"
@@ -521,9 +645,13 @@ class WorkspaceSession:
         self.closing = True
         self._stop.set()
         self._loading_cancel.set()
-        loader = self._loader_task
+        with self._loader_start_lock:
+            loader = self._loader_task
         if loader is not None:
             loader.close()
+        loader_thread = self._loader_thread
+        if loader_thread is not None and loader_thread is not threading.current_thread():
+            loader_thread.join(timeout=20)
         with self._lock:
             if self._task is not None:
                 self._task.close()
@@ -531,3 +659,9 @@ class WorkspaceSession:
                 self._state["task"].update(status="cancelled")
             self._retire_explorer()
             self._save()
+            if self._state.get("retention_pending"):
+                self._discard_staging()
+        if (not (loader_thread and loader_thread.is_alive())
+                and all(event.wait(20) for event in tuple(self._retirements)) and self._lease is not None):
+            self._lease.close()
+            self._lease = None

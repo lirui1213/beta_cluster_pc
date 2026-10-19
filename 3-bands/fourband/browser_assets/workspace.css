@@ -133,8 +133,49 @@ h1 svg {
 .context-controls select {
   width: 130px;
 }
-.context-controls .history-label select {
-  width: 230px;
+#current-analysis {
+  max-width: 100%;
+  min-width: 0;
+}
+#current-analysis-label {
+  overflow-wrap: anywhere;
+}
+#analysis-dialog {
+  width: min(460px, calc(100% - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: inherit;
+  background: #fff;
+  overflow: auto;
+}
+#analysis-dialog::backdrop {
+  background: rgb(20 32 38 / 40%);
+}
+#analysis-dialog h2 {
+  font-size: 16px;
+}
+#analysis-summary {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  margin: 12px 0 20px;
+}
+.analysis-choices {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+@media (max-width: 480px) {
+  .analysis-choices {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .analysis-choices button {
+    min-height: 40px;
+  }
 }
 .statusbar {
   display: flex;
@@ -159,6 +200,10 @@ h1 svg {
   background: #fff0ee;
   border-bottom: 1px solid #ddaaa4;
   color: #9c3026;
+  padding: 9px 18px;
+  overflow-wrap: anywhere;
+}
+#retention-warning {
   padding: 9px 18px;
   overflow-wrap: anywhere;
 }
@@ -568,11 +613,8 @@ pre {
     flex: 1;
     width: 90px;
   }
-  .context-controls .history-label {
-    flex-basis: 100%;
-  }
-  .context-controls .history-label select {
-    width: 200px;
+  #current-analysis {
+    width: 100%;
   }
   .statusbar {
     padding: 6px 10px;

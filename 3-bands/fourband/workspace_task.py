@@ -38,7 +38,7 @@ def copy_action_state(source, target):
         if path.is_file() and path.suffix.lower() in {".json", ".joblib", ".csv"}:
             if not path.resolve().is_relative_to(source):
                 raise ValueError("State inputs must remain inside the accepted state directory.")
-            if path.name != "workspace_manifest.json":
+            if path.name != "workspace_manifest.json" and not path.name.startswith("workspace_data_"):
                 shutil.copy2(path, target / path.name)
     extraction = source / "extraction"
     if extraction.is_dir():

@@ -45,6 +45,14 @@ async function readyFrame(){
 }
 try{
   await page.goto(base);
+  await page.waitForFunction(()=>document.querySelector('#analysis-dialog')?.open || !document.querySelector('#subject')?.disabled);
+  if(!await page.locator('#run-id').textContent() && !await page.locator('#analysis-dialog').isVisible()){
+    await page.locator('#subject').selectOption('HS0015');
+    await page.waitForFunction(()=>document.querySelector('#analysis-dialog')?.open || !document.querySelector('#block')?.disabled);
+    if(await page.locator('#block').inputValue()!=='B03') await page.locator('#block').selectOption('B03');
+    await page.locator('#analysis-dialog').waitFor({state:'visible'});
+  }
+  if(await page.locator('#analysis-dialog').isVisible()) await page.locator('#analysis-continue').click();
   await page.waitForFunction(()=>document.querySelector('#run-id')?.textContent.includes('_web_'),{},{timeout:60000});
   report.subject=await page.locator('#subject').inputValue();report.block=await page.locator('#block').inputValue();
   assert.equal(report.subject,'HS0015');assert.equal(report.block,'B03');
@@ -76,13 +84,14 @@ try{
   await page.locator('#tab-settings').click();
   await page.locator('#subject').selectOption('HS0012');
   await page.waitForFunction(()=>document.querySelector('#block')?.options.length>0);
+  await page.waitForFunction(()=>!document.querySelector('#explorer')?.getAttribute('src'));
   assert.equal(await page.locator('#explorer').getAttribute('src'),null,'Patient switch must detach old explorer');
   await page.screenshot({path:path.join(output,'other_patient.png'),fullPage:true});
   await page.locator('#subject').selectOption('HS0015');
   await page.locator('#block').selectOption('B03');
-  const state=await (await page.request.get(base+'api/workspace/state')).json();
-  await page.waitForFunction(id=>[...document.querySelector('#history').options].some(o=>o.value===id),state.run_id);
-  await page.locator('#history').selectOption(state.run_id);
+  await page.locator('#analysis-dialog').waitFor({state:'visible'});
+  await page.screenshot({path:path.join(output,'continue_dialog.png'),fullPage:true});
+  await page.locator('#analysis-continue').click();
   await readyFrame();
   await page.setViewportSize({width:390,height:844});
   await page.waitForTimeout(500);

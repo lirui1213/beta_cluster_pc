@@ -202,7 +202,8 @@ test("API sends identity JSON without inventing revisions, propagates errors", a
     payload: { pairs: [] },
   });
   assert.equal(calls[0].options.credentials, "same-origin");
-  await api.get("history", { subject: "A & B", block: "b" });
+  await api.get("current", { subject: "A & B", block: "b" });
+  assert.equal(new URL(calls[1].url).pathname, "/s/token/api/workspace/current");
   assert.equal(new URL(calls[1].url).searchParams.get("subject"), "A & B");
   const failing = new WorkspaceAPI(
     "http://127.0.0.1:1/s/t/",
@@ -307,7 +308,7 @@ test("review coordinates and classes stay bound to accepted FIRST model", () => 
 if (process.argv.includes("--browser"))
   test(
     "desktop and mobile browser workflow",
-    { timeout: 180000 },
+    { timeout: 240000 },
     browserChecks,
   );
 
@@ -369,16 +370,44 @@ async function browserChecks() {
     pc2: Math.cos(i * 1.2) * ((i % 3) + 1),
     pc3: Math.sin(i * .8) * ((i % 3) + 1),
   }));
-  function later(fn) {
+  const saved = new Map();
+  const contextKey = (value) => `${value.subject}/${value.block}`;
+  const summary = (value) => ({
+    id: value.run_id, run_id: value.run_id, subject: value.subject,
+    block: value.block, stage: value.stage, revision: value.revision,
+    created_at: "2026-10-19T08:00:00Z", read_only: false,
+  });
+  saved.set("HS0015/B04", {
+    run_id: "saved-b04", subject: "HS0015", block: "B04", revision: 8,
+    stage: "second_ready", read_only: false,
+    config: validateConfig({first_k: 6}),
+    data: {qc_rows: qcRows, trial_exclusions: [["A1", 2]], pca},
+    first_round_id: "saved-first", second_round_id: "saved-second",
+    selected_round: "saved-second",
+    rounds: [
+      {id: "saved-first", round: 1, data: {pca}},
+      {id: "saved-second", round: 2, data: {pca}},
+    ],
+    task: null,
+    retention_warning: "部分旧缓存被占用；结果已保存，将重试清理。",
+  });
+  let currentFailure = false, failExtraction = false, extractionDelay = 100;
+  function later(fn, delay = 100) {
     const timer = setTimeout(() => {
       timers.delete(timer);
       fn();
-    }, 100);
+    }, delay);
     timers.add(timer);
   }
   function finish(action, payload) {
     state.task.status = "completed";
     state.revision++;
+    if (action === "extract" && failExtraction) {
+      failExtraction = false;
+      state.task.status = "failed";
+      state.task.error = "Fixture extraction failed";
+      return;
+    }
     if (action === "extract" || action === "detect_qc") {
       state.stage = "trial_review";
       state.data = {
@@ -419,6 +448,9 @@ async function browserChecks() {
             }));
       state.data.cluster_sizes =
         round === 1 ? { 0: 6, 1: 6, 2: 6 } : { 8: 6, 9: 6, 10: 6 };
+      state.rounds = state.rounds.filter((item) => item.round !== round &&
+        !(round === 1 && item.round === 2));
+      if (round === 1) state.second_round_id = null;
       state.rounds.push({
         id,
         round,
@@ -444,6 +476,7 @@ async function browserChecks() {
         summary: { n_resamples: 5, mean_ari: 0.9 },
         round: payload.round,
       };
+    saved.set(contextKey(state), clone(state));
   }
   const server = createServer(async (req, res) => {
     try {
@@ -482,15 +515,23 @@ async function browserChecks() {
               "Missing anatomy reference_mri; brain display unavailable",
             ],
           };
-        else if (action === "history")
-          result = {
-            runs: [
-              { id: "saved", label: "已保存分析", stage: "second_ready" },
-              { id: "legacy", label: "旧版结果", read_only: true },
-            ],
-          };
+        else if (action === "current") {
+          if (currentFailure) {
+            res.statusCode = 503;
+            res.end(JSON.stringify({error: "Current analysis unavailable"}));
+            return;
+          }
+          const current = saved.get(contextKey(Object.fromEntries(url.searchParams)));
+          result = {analysis: current ? summary(current) : null};
+        }
         else if (action === "state") result = state;
         else if (action === "start") {
+          const current = saved.get(contextKey(body));
+          if ((body.replace_run_id ?? null) !== (current?.run_id ?? null)) {
+            res.statusCode = 409;
+            res.end(JSON.stringify({error: "Stale replacement acknowledgement"}));
+            return;
+          }
           state = {
             run_id: `run-${++serial}`,
             revision: 1,
@@ -508,7 +549,7 @@ async function browserChecks() {
               stage: "Extracting",
             },
           };
-          later(() => finish("extract", {}));
+          later(() => finish("extract", {}), extractionDelay);
           result = state;
         } else if (action === "action") {
           assert.equal(body.run_id, state.run_id);
@@ -537,11 +578,9 @@ async function browserChecks() {
           state.revision++;
           result = state;
         } else if (action === "open") {
-          state.run_id = body.run_id;
-          state.subject = body.subject;
-          state.block = body.block;
-          state.read_only = body.run_id === "legacy";
-          state.stage = state.read_only ? "historical" : "second_ready";
+          const current = saved.get(contextKey(body));
+          assert.equal(body.run_id, current?.run_id);
+          state = clone(current);
           state.revision++;
           state.task = {
             id: "opening",
@@ -552,7 +591,7 @@ async function browserChecks() {
           state.explorer_url = null;
           later(() => {
             state.task.status = "completed";
-            state.explorer_url = "explorer/saved/";
+            state.explorer_url = `explorer/${state.selected_round || state.run_id}/`;
             state.revision++;
           });
           result = state;
@@ -604,7 +643,8 @@ async function browserChecks() {
   let browser;
   const errors = [],
     external = [],
-    dialogs = [];
+    dialogs = [],
+    screenshots = [];
   try {
     browser = await chromium.launch({
       headless: true,
@@ -644,6 +684,7 @@ async function browserChecks() {
         path: path.join(output, name + ".png"),
         fullPage: true,
       });
+      screenshots.push(name + ".png");
     };
     const layout = async () =>
       assert.equal(
@@ -657,15 +698,78 @@ async function browserChecks() {
     await enabled("start");
     await screenshot("desktop-settings");
     await layout();
+    // A saved context requires a choice; Cancel must leave the old draft untouched.
+    const beforeChoice = requests.length;
+    await page.locator("#block").selectOption("B04");
+    await page.getByRole("dialog").waitFor({state: "visible", timeout: 5000});
+    assert.equal(await page.getByRole("dialog").getAttribute("aria-modal"), "true");
+    assert.match(await page.getByRole("dialog").textContent(), /HS0015.*B04/s);
+    await screenshot("desktop-current-dialog");
+    await page.setViewportSize({width: 390, height: 844});
+    await screenshot("mobile-current-dialog");
+    await layout();
+    assert.equal(await page.getByRole("dialog").evaluate(el => el.scrollWidth > el.clientWidth), false);
+    await page.keyboard.press("Tab");
+    assert.equal(await page.getByRole("dialog").evaluate(el => el.contains(document.activeElement)), true);
+    await page.locator("#analysis-continue").focus();
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "analysis-cancel");
+    await page.keyboard.press("Tab");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "analysis-continue");
+    await click("analysis-cancel");
+    assert.equal(await page.locator("#block").inputValue(), "B03");
+    assert.equal(requests.length, beforeChoice, "Cancel must not mutate the server");
+    await enabled("start");
+    await page.setViewportSize({width: 1440, height: 1000});
+    await page.locator("#block").selectOption("B04");
+    await click("analysis-continue");
+    await enabled("confirm-trials");
+    assert.deepEqual(requests.at(-1), {action: "open", body: {subject: "HS0015", block: "B04", run_id: "saved-b04"}});
+    assert.equal(await page.locator("#first-k").inputValue(), "6");
+    assert.match(await page.locator("#selection-count").textContent(), /已选 1/);
+    assert.equal(await page.locator("#round option").count(), 2);
+    assert.equal(await page.getByRole("status", {name: "缓存清理状态"}).isVisible(), true);
+    assert.equal(await page.getByRole("status", {name: "缓存清理状态"}).textContent(), "部分旧缓存被占用；结果已保存，将重试清理。");
+    assert.equal(await page.locator("#start").isDisabled(), true, "Attached analysis cannot silently overwrite");
+    const afterContinue = requests.length;
+    await page.reload();
+    await enabled("confirm-trials");
+    assert.equal(await page.getByRole("dialog").count(), 0);
+    assert.equal(requests.length, afterContinue, "Reload reconnects without opening or prompting");
+    await click("current-analysis");
+    await page.getByRole("dialog").waitFor({state: "visible"});
+    await page.keyboard.press("Escape");
+    assert.equal(await page.getByRole("dialog").count(), 0);
+    await enabled("current-analysis");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "current-analysis", "Dialog returns focus to its invoking control");
+    assert.equal(await page.locator("#run-id").textContent(), "saved-b04");
+    await click("current-analysis");
+    await click("analysis-new");
+    await enabled("start");
+    assert.equal(requests.length, afterContinue, "New prepares only a local draft");
+    assert.equal(await page.getByRole("status", {name: "缓存清理状态"}).isVisible(), false);
+    await page.waitForTimeout(2400);
+    assert.equal(await page.locator("#run-id").textContent(), "", "Detached draft rejects old polls");
+    assert.equal(await page.locator("#explorer").getAttribute("src"), null);
+    assert.equal(await page.locator("#first-k").inputValue(), "10");
+    const beforeReplaceDialogs = dialogs.length;
+    await click("start");
+    await enabled("confirm-trials");
+    assert.equal(requests.at(-1).body.replace_run_id, "saved-b04");
+    assert.equal(dialogs.length, beforeReplaceDialogs, "Start has no second overwrite confirmation");
+    await page.locator("#block").selectOption("B03");
+    await enabled("start");
+    assert.equal(await page.getByRole("dialog").count(), 0, "Empty context selects a draft automatically");
     await page.locator("#first-k").fill("3");
     await click("start");
     await enabled("confirm-trials");
-    assert.equal(requests.filter((r) => r.action === "start").length, 1);
+    assert.equal(requests.filter((r) => r.action === "start").length, 2);
+    assert.equal(requests.at(-1).body.replace_run_id ?? null, null);
     await page.reload();
     await enabled("confirm-trials");
     assert.equal(
       requests.filter((r) => r.action === "start").length,
-      1,
+      2,
       "Reload must reconnect without start",
     );
     await page.locator("#tab-trials").click();
@@ -831,25 +935,58 @@ async function browserChecks() {
     await layout();
     await page.setViewportSize({width: 1440, height: 1000});
     await page.locator("#tab-results").click();
-    const oldRound = state.rounds[0].id;
-    await page.locator("#round").selectOption(oldRound);
     await page.locator("#tab-review").click();
-    await page.waitForFunction(() =>
-      document.getElementById("round-status").textContent.includes("历史"),
-    );
     assert.equal(
       await page.locator("#round option").count(),
       state.rounds.length,
     );
-    assert.equal(await page.locator("#preview-review").isDisabled(), true);
-    assert.equal(await page.locator("#stability").isDisabled(), true);
-    await page.locator("#history").selectOption("legacy");
-    await page.waitForFunction(
-      () => document.getElementById("task-status").textContent === "已完成",
-    );
-    await page.locator("#tab-trials").click();
-    assert.equal(await page.locator("#detect-qc").isDisabled(), true);
-    assert.equal(await page.locator("#confirm-trials").isDisabled(), true);
+    assert.equal(state.rounds.length, 1, "Refitting retains only current rounds");
+    assert.equal(await page.locator("#preview-review").isDisabled(), false);
+    assert.equal(await page.locator("#start").isDisabled(), true);
+    const retainedRun = state.run_id;
+    currentFailure = true;
+    const beforeError = requests.length;
+    await page.locator("#block").selectOption("B04");
+    await page.waitForFunction(() => document.getElementById("error").textContent.includes("Current analysis unavailable"));
+    assert.equal(await page.locator("#block").inputValue(), "B03");
+    assert.equal(await page.locator("#run-id").textContent(), retainedRun);
+    assert.equal(requests.length, beforeError, "Lookup errors must not open or start anything");
+    currentFailure = false;
+    await click("current-analysis");
+    await click("analysis-new");
+    await enabled("start");
+    const competing = {...clone(saved.get("HS0015/B03")), run_id: "competing-run"};
+    saved.set("HS0015/B03", competing);
+    const beforeStaleDialogs = dialogs.length;
+    await click("start");
+    await page.waitForFunction(() => document.getElementById("error").textContent.includes("Stale replacement acknowledgement"));
+    assert.equal(requests.at(-1).body.replace_run_id, retainedRun);
+    assert.equal(dialogs.length, beforeStaleDialogs);
+    assert.equal(saved.get("HS0015/B03").run_id, "competing-run");
+    await click("current-analysis");
+    await click("analysis-new");
+    failExtraction = true;
+    await click("start");
+    await page.waitForFunction(() => document.getElementById("task-status").textContent === "失败");
+    assert.equal(requests.at(-1).body.replace_run_id, "competing-run");
+    assert.equal(saved.get("HS0015/B03").run_id, "competing-run", "Failed replacement retains resumable record");
+    await click("current-analysis");
+    await click("analysis-continue");
+    await enabled("confirm-trials");
+    assert.equal(await page.locator("#run-id").textContent(), "competing-run");
+    await click("current-analysis");
+    await click("analysis-new");
+    extractionDelay = 10000;
+    await click("start");
+    await enabled("cancel");
+    await click("cancel");
+    await page.waitForFunction(() => document.getElementById("task-status").textContent === "已取消");
+    assert.equal(saved.get("HS0015/B03").run_id, "competing-run", "Cancelled extraction retains saved analysis");
+    await click("current-analysis");
+    await click("analysis-continue");
+    await enabled("confirm-trials");
+    assert.equal(await page.locator("#run-id").textContent(), "competing-run");
+    extractionDelay = 100;
     state.read_only = false;
     state.task = {
       id: "opening-busy",
@@ -864,7 +1001,27 @@ async function browserChecks() {
       () => document.getElementById("block").value === "B01",
     );
     assert.equal(requests.at(-1).action, "cancel");
+    await enabled("start");
     assert.equal(await page.locator("#explorer").getAttribute("src"), null);
+    // A fresh session with a saved context must ask; cancelling cannot attach via polls.
+    state = {run_id: null, revision: 0, subject: "HS0015", block: "B03", stage: "idle", config: {}, data: {}, rounds: [], task: null};
+    const beforeFreshSession = requests.length;
+    await page.reload();
+    await page.getByRole("dialog").waitFor({state: "visible"});
+    await click("analysis-cancel");
+    assert.equal(await page.locator("#start").isDisabled(), true);
+    state = clone(saved.get("HS0015/B03"));
+    state.revision += 100;
+    await page.waitForTimeout(2400);
+    assert.equal(requests.length, beforeFreshSession);
+    assert.equal(await page.locator("#run-id").textContent(), "");
+    await page.locator("#block").selectOption("B04");
+    await click("analysis-cancel");
+    assert.equal(await page.locator("#block").inputValue(), "B03", "Cancel restores context even before the first attachment");
+    await click("current-analysis");
+    await click("analysis-continue");
+    await enabled("confirm-trials");
+    assert.equal(await page.locator("#error").isVisible(), false);
     assert.deepEqual(errors, []);
     assert.deepEqual(external, []);
     await writeFile(
@@ -872,7 +1029,7 @@ async function browserChecks() {
       JSON.stringify(
         {
           status: "passed",
-          screenshots: 7,
+          screenshots,
           errors,
           external,
           requests,

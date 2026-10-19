@@ -17,11 +17,9 @@
       <div class="context-controls">
         <label>患者<select id="subject"></select></label
         ><label>区块<select id="block"></select></label>
-        <label class="history-label"
-          >分析记录<select id="history">
-            <option value="">新分析</option>
-          </select></label
-        >
+        <button id="current-analysis" aria-haspopup="dialog" aria-controls="analysis-dialog" disabled>
+          <i data-lucide="folder-open" aria-hidden="true"></i><span id="current-analysis-label">当前分析</span>
+        </button>
       </div>
       <div class="commands">
         <button
@@ -45,6 +43,16 @@
       ><span id="elapsed"></span><span id="run-id"></span>
     </section>
     <div id="error" role="alert" hidden></div>
+    <div id="retention-warning" class="warning" role="status" aria-label="缓存清理状态" hidden></div>
+    <dialog id="analysis-dialog" aria-modal="true" aria-labelledby="analysis-title" aria-describedby="analysis-summary">
+      <h2 id="analysis-title">当前分析</h2>
+      <p id="analysis-summary"></p>
+      <div class="analysis-choices">
+        <button id="analysis-continue" class="primary" autofocus><i data-lucide="folder-open" aria-hidden="true"></i>继续分析</button>
+        <button id="analysis-new"><i data-lucide="file-plus" aria-hidden="true"></i>新建并替换</button>
+        <button id="analysis-cancel">取消</button>
+      </div>
+    </dialog>
     <nav role="tablist" aria-label="分析视图">
       <button
         id="tab-settings"
