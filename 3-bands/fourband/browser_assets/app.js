@@ -1,5 +1,6 @@
 import { SessionAPI, curveTraces, eventShapes, safeImageURL } from "./core.mjs";
 import { BrainView } from "./brain.js";
+import { ClusterGrid } from "./cluster_grid.mjs";
 
 const $ = (id) => document.getElementById(id);
 const base = new URL("./", window.location.href);
@@ -32,6 +33,7 @@ const state = {
   clearing: false,
   surfaceWarnings: [],
 };
+const clusterGrid = new ClusterGrid($("cluster-grid-pane"), () => state.colors);
 let brain = null,
   plotQueue = Promise.resolve(),
   clock = null,
@@ -430,7 +432,7 @@ async function requestDisplay() {
 function resizePlots() {
   if (!$("plots").hidden && window.Plotly)
     document
-      .querySelectorAll(".js-plotly-plot")
+      .querySelectorAll("#plots .js-plotly-plot")
       .forEach((host) => window.Plotly.Plots.resize(host).catch(() => {}));
 }
 async function refreshPlotStyle() {
@@ -539,6 +541,7 @@ function configure(meta) {
     });
   $("brain-pane").hidden = !meta.surface_enabled;
   $("curves-pane").hidden = !meta.curves_enabled;
+  $("cluster-grid-pane").hidden = !meta.curves_enabled;
   $("workspace").classList.toggle("brain-only", !meta.curves_enabled);
   $("workspace").classList.toggle("curves-only", !meta.surface_enabled);
   document.querySelectorAll(".brain-control").forEach((element) => {
@@ -766,7 +769,7 @@ async function exportView() {
           context.fillText(entry.text, entry.x + 22, entry.y);
         }
         context.restore();
-        for (const host of document.querySelectorAll(".js-plotly-plot")) {
+        for (const host of document.querySelectorAll("#plots .js-plotly-plot")) {
           const rect = host.getBoundingClientRect();
           const source = await window.Plotly.toImage(host, {
             format: "png",
@@ -851,6 +854,7 @@ $("class-filter").addEventListener("change", () => {
 $("class-color").addEventListener("input", () => {
   state.colors[classOf()] = $("class-color").value;
   refreshPlotStyle();
+  clusterGrid.recolor().catch(error => notice(`Class summary color update failed: ${error.message}`));
 });
 for (const id of [
   "brain-color",
@@ -929,6 +933,7 @@ $("close-session").addEventListener("click", async () => {
     state.closed = true;
     setReady("Session closed");
     notice("");
+    clusterGrid.close();
     document.body.classList.add("closed");
     document.querySelectorAll("button,input,select").forEach((element) => {
       element.disabled = true;
@@ -953,7 +958,7 @@ async function boot() {
     configure(meta);
     const tasks = [];
     if (meta.surface_enabled) tasks.push(loadSurface());
-    if (meta.curves_enabled) tasks.push(requestDisplay());
+    if (meta.curves_enabled) tasks.push(requestDisplay(), clusterGrid.load(api));
     if (!meta.surface_enabled && !meta.curves_enabled)
       throw new Error("This session has no enabled display");
     await Promise.all(tasks);

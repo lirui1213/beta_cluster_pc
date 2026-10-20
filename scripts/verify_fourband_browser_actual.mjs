@@ -36,7 +36,7 @@ try {
     return {colors:colors.size,nonbackground};
   });
   assert.ok(pixels.colors>50 && pixels.nonbackground>1000,'Real cortex canvas must not be blank');
-  const plots=await page.evaluate(()=>[...document.querySelectorAll('.js-plotly-plot')].map(plot=>({
+  const plots=await page.evaluate(()=>[...document.querySelectorAll('#plots .js-plotly-plot')].map(plot=>({
     samples:plot.data[0].x.length, traces:plot.data.length, audio:plot.data.some(trace=>trace.yaxis==='y2'),
     finite:plot.data[0].y.filter(Number.isFinite).length, title:plot.layout.title.text})));
   assert.equal(plots.length,4);assert.ok(plots.every(p=>p.samples>100 && p.finite>100 && p.audio));

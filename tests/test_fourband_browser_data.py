@@ -70,11 +70,14 @@ def test_metadata_contract_loads_original_events_and_saved_run_identity(snapshot
     before = joblib.hash(snapshot)
     meta = adapter().session_metadata(snapshot)
     assert set(meta) == {"subject", "block", "round", "channels", "labels", "bands", "pairs",
-                         "settings", "surface_options", "surface_enabled", "curves_enabled", "warnings"}
+                         "settings", "surface_options", "surface_enabled", "curves_enabled", "warnings",
+                         "summary_band_limits", "summary_speech_duration_seconds"}
     assert (meta["subject"], meta["block"], meta["round"]) == ("HS0015", "B03", 2)
     assert meta["channels"] == ["E9", "E2", "E7"]
     assert meta["labels"] == [2, 2, -1]
     assert meta["bands"] == ["theta", "beta1", "beta2", "high_gamma"]
+    assert meta["summary_band_limits"] == {name:list(limits) for name,limits in snapshot["extraction"].bands.items()}
+    assert meta["summary_speech_duration_seconds"] == 1.
     assert [(p["first_trial_id"], p["second_trial_id"]) for p in meta["pairs"]] == [(7, 8), (8, 9)]
     assert meta["pairs"][1] == dict(first_trial_id=8, second_trial_id=9, first_onset=34.,
                                     first_offset=35., second_onset=37., second_offset=38., gap_seconds=2.)

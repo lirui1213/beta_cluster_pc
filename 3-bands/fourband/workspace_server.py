@@ -71,6 +71,8 @@ def make_workspace_server(session, *, token=None, assets_dir=None):
                     self.send(200, explorer.metadata)
                 elif rest == "api/surface":
                     self.send(200, explorer.surface())
+                elif rest == "api/cluster-grid":
+                    self.send(200, explorer.cluster_grid())
                 elif rest.startswith("api/job/"):
                     channel = query.get("channel", [explorer.metadata["channels"][0]])[0]
                     self.send(200, explorer.read_job(rest.removeprefix("api/job/"), channel))

@@ -31,6 +31,31 @@ for (const dependency of manifest.dependencies)
 const { SessionAPI, curveTraces, eventShapes, safeImageURL } = await import(
   pathToFileURL(path.join(assets, "core.mjs"))
 );
+const {gridTraces,ClusterGrid} = await import(pathToFileURL(path.join(assets,"cluster_grid.mjs")));
+const gapTraces = gridTraces({times_ms:[0,1,2,3,4],mean:[1,2,null,3,4],
+  sem:[.1,.1,null,.2,.2],audio:[0,1,null,1,0],counts:[2,2,0,2,2]}, "#d42f66");
+assert.equal(gapTraces[1].fill, "toself", "SEM must close each finite region without bridging gaps");
+assert.deepEqual(gapTraces[1].x, [0,1,1,0,null,3,4,4,3,null]);
+assert.deepEqual(gapTraces[2].y, [1,2,null,3,4]);
+const probe = Object.create(ClusterGrid.prototype);
+let beginRestyle,releaseRestyle,restyleCalls=0;
+const restyleStarted = new Promise(resolve => {beginRestyle=resolve;});
+const oldWindow = globalThis.window;
+globalThis.window = {Plotly:{restyle:()=>{
+  restyleCalls++;
+  beginRestyle();
+  if (restyleCalls > 1) return Promise.resolve();
+  return new Promise(resolve => {releaseRestyle=resolve;});
+}}};
+Object.assign(probe,{closed:false,queue:Promise.resolve(),controller:new AbortController(),
+  colors:()=>({0:"#167d91"}),entries:[{plot:{},label:0,dot:{style:{}}}]});
+const recoloring=probe.recolor();
+await restyleStarted;
+probe.close();
+releaseRestyle();
+await recoloring;
+globalThis.window=oldWindow;
+assert.equal(restyleCalls,1,"Closing during SEM update must stop the pending mean update");
 const origin = "http://127.0.0.1:1234";
 assert.equal(
   safeImageURL("api/image/job1", `${origin}/s/token/`),
@@ -168,6 +193,7 @@ let exports = [],
   closeCount = 0,
   nextID = 0;
 let heldChannel = null;
+let gridAvailable = true;
 const channels = ["ECoG_1", "ECoG_16", "ECoG_3"];
 const metadata = {
   subject: "Fixture",
@@ -195,6 +221,18 @@ const metadata = {
   surface_enabled: true,
   curves_enabled: true,
   warnings: ["Synthetic frontend fixture; no physiological verification."],
+};
+const gridPayload = {
+  available: true,
+  bands: metadata.bands.map((name, i) => ({name, low:[4,13,24,70][i], high:[8,24,40,150][i]})),
+  classes: [{label:0,n_electrodes:2}, {label:1,n_electrodes:1}],
+  speech_offset_ms: 1500,
+  panels: [0,1].flatMap(label => metadata.bands.map((band, i) => ({
+    band, label, times_ms:[-1000,0,500,1000,1500,2000,2500],
+    mean:[0,i+.2,i+.6,null,i+.3,i-.2,0],
+    sem:label === 0 ? [.1,.2,.2,null,.15,.1,.1] : [null,null,null,null,null,null,null],
+    audio:[0,.1,.8,null,.3,.1,0], counts:[2,2,2,0,2,2,2],
+  }))),
 };
 // A deterministic asymmetric triangulated ellipsoid tests real WebGL geometry rendering.
 const positions = [],
@@ -273,6 +311,10 @@ const server = http.createServer(async (req, res) => {
   }
   if (route === "api/surface") {
     json(surface);
+    return;
+  }
+  if (route === "api/cluster-grid") {
+    json(gridAvailable ? gridPayload : {available:false,message:"Saved class summary is unavailable"});
     return;
   }
   if (req.method === "POST") {
@@ -425,8 +467,17 @@ try {
   );
   await page.waitForSelector("#brain canvas");
   await page.waitForFunction(
-    () => document.querySelectorAll(".js-plotly-plot").length === 4,
+    () => document.querySelectorAll("#plots .js-plotly-plot").length === 4,
   );
+  await page.waitForFunction(() => document.querySelectorAll("#cluster-grid .js-plotly-plot").length === 8, null, {timeout:3000});
+  assert.equal(await page.locator("#cluster-grid .cluster-grid-row").count(), 2);
+  const gridSnapshot = await page.locator("#cluster-grid .js-plotly-plot").first().evaluate(el => ({
+    y:el.data[2].y, audio:el.data[3].y, shapes:el.layout.shapes,
+  }));
+  assert.deepEqual(gridSnapshot.y, gridPayload.panels[0].mean);
+  assert.equal(gridSnapshot.y[3], null, "Missing samples remain gaps");
+  assert.deepEqual(gridSnapshot.shapes.map(shape => shape.x0), [0,1500]);
+  await page.locator("#cluster-grid-pane").screenshot({path:path.join(out,"cluster-grid-desktop.png")});
   assert.equal(await page.locator("#pair").inputValue(), "0");
   assert.equal(await page.locator("#point-size").inputValue(), "14");
   assert.equal(await page.locator("#brain-color").inputValue(), "#fffff0");
@@ -487,7 +538,7 @@ try {
   await pendingPage.close();
   const initial = await page.evaluate(() => ({
     nullGap: document.querySelector(".js-plotly-plot").data[0].y[2],
-    plotCount: document.querySelectorAll(".js-plotly-plot").length,
+    plotCount: document.querySelectorAll("#plots .js-plotly-plot").length,
     selectedGap: document
       .querySelector(".js-plotly-plot")
       .layout.shapes.filter(
@@ -581,6 +632,9 @@ try {
     req.url.endsWith("api/compute"),
   ).length;
   await page.locator("#class-color").fill("#d42f66");
+  await page.waitForFunction(() => [...document.querySelectorAll('#cluster-grid [data-label="1"] .js-plotly-plot')]
+    .every(el => el.data[2].line.color === "#d42f66" && el.data[1].fillcolor === "rgba(212,47,102,0.18)"));
+  assert.equal(await page.locator('#cluster-grid [data-label="0"] .js-plotly-plot').first().evaluate(el => el.data[2].line.color), "#167d91");
   await page.locator("#brain-opacity").fill("0.3");
   await page.locator("#point-size").fill("5");
   await page.locator("#labels").uncheck();
@@ -605,6 +659,10 @@ try {
   await page.waitForFunction(
     () => document.querySelector("#status-text").textContent === "Ready",
   );
+  assert.deepEqual(await page.locator("#cluster-grid .js-plotly-plot").first().evaluate(el => ({
+    y:el.data[2].y,audio:el.data[3].y,shapes:el.layout.shapes,
+  })), gridSnapshot, "Pair and continuous sigma do not change saved class summary");
+  assert.equal(requests.filter(req => req.url.endsWith("api/cluster-grid")).length, 2, "One saved-summary fetch per page, independent of display changes");
   await page.locator("#view-detail").click();
   await page.waitForSelector("#detail-image:not([hidden])");
   await page.waitForFunction(
@@ -688,6 +746,10 @@ try {
       );
     }
   await page.screenshot({ path: path.join(out, "mobile.png"), fullPage: true });
+  await page.waitForFunction(() => [...document.querySelectorAll("#cluster-grid .js-plotly-plot")].every(el => Math.abs(el._fullLayout.width-el.clientWidth) < 2));
+  const mobileGrid = await page.locator("#cluster-grid .js-plotly-plot").evaluateAll(nodes => nodes.map(el => el.getBoundingClientRect().toJSON()));
+  assert.ok(mobileGrid[1].top >= mobileGrid[0].bottom, "Band panels stack on mobile");
+  await page.locator("#cluster-grid-pane").screenshot({path:path.join(out,"cluster-grid-mobile.png")});
   await page.locator("#sigma").fill("9");
   await page.locator("#apply-sigma").click();
   await page.waitForFunction(() =>
@@ -724,7 +786,7 @@ try {
     () => document.querySelector("#status-text").textContent === "Ready",
   );
   assert.match(await fallback.locator("#brain-error").textContent(), /WebGL/);
-  assert.equal(await fallback.locator(".js-plotly-plot").count(), 4);
+  assert.equal(await fallback.locator("#plots .js-plotly-plot").count(), 4);
   await fallback.screenshot({
     path: path.join(out, "webgl-unavailable.png"),
     fullPage: true,
@@ -884,6 +946,15 @@ try {
     requests.filter((req) => req.url.endsWith("api/surface")).length,
     surfaceCount,
   );
+  gridAvailable = false;
+  const missingSummary = await browser.newPage();
+  await missingSummary.goto(base);
+  await missingSummary.waitForFunction(() => document.querySelector("#status-text").textContent === "Ready");
+  await missingSummary.waitForFunction(() => document.querySelector("#cluster-grid-status").textContent.includes("unavailable"));
+  assert.equal(await missingSummary.locator("#plots .js-plotly-plot").count(), 4, "Missing summary must not block continuous response");
+  assert.equal(await missingSummary.locator("#cluster-grid .js-plotly-plot").count(), 0);
+  await missingSummary.close();
+  gridAvailable = true;
   assert.deepEqual(errors, []);
   assert.deepEqual(external, []);
   const report = {

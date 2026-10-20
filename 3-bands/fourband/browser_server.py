@@ -52,6 +52,8 @@ def make_server(session, *, token=None, assets_dir=None):
                     self._send(200, session.metadata)
                 elif route == "api/surface":
                     self._send(200, session.surface())
+                elif route == "api/cluster-grid":
+                    self._send(200, session.cluster_grid())
                 elif route.startswith("api/job/"):
                     channel = query.get("channel", [session.metadata["channels"][0]])[0]
                     self._send(200, session.read_job(route[len("api/job/"):], channel))

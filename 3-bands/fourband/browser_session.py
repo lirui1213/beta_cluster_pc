@@ -1,5 +1,6 @@
 """Display-only jobs and bounded export ownership for one browser session."""
 import base64
+from copy import deepcopy
 from datetime import datetime
 import math
 from numbers import Integral, Real
@@ -23,6 +24,7 @@ class BrowserSession:
         self._latest = None
         self._counter = 0
         self._surface = None
+        self._cluster_grid = None
         self.closing = False
 
     def surface(self):
@@ -31,6 +33,14 @@ class BrowserSession:
                 from .browser_data import surface_payload
                 self._surface = surface_payload(self.request)
             return self._surface
+
+    def cluster_grid(self):
+        """Keep one saved snapshot, independent of numerical jobs and clear()."""
+        with self._lock:
+            if self._cluster_grid is None:
+                from .browser_data import cluster_grid_payload
+                self._cluster_grid = cluster_grid_payload(self.request, self.metadata)
+            return deepcopy(self._cluster_grid)
 
     def _validate(self, body):
         allowed = {"view", "trial_ids", "sigma_seconds", "channel", "band"}

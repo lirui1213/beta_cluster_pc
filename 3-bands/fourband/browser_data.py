@@ -4,15 +4,17 @@ No renderer or fitted estimator is constructed here. Detail images are rendered
 with Agg in the numerical process; continuous curves use its existing result.
 """
 from collections.abc import Mapping
+import csv
 from io import BytesIO
 import json
+import math
 from numbers import Integral, Real
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-__all__ = ["session_metadata", "surface_payload", "continuous_payload",
+__all__ = ["session_metadata", "surface_payload", "continuous_payload", "cluster_grid_payload",
            "render_detail_snapshot", "json_safe"]
 
 
@@ -153,10 +155,93 @@ def session_metadata(request):
         settings["trial_ids"] = []
     options = request.get("surface_options") or {}
     identity = _identity(request, warnings)
+    # Match visualization._median_event_duration without importing a renderer.
+    duration = float(np.nanmedian(reference.events["duration"].to_numpy(float)))
+    if not np.isfinite(duration) or duration <= 0:
+        raise ValueError("Retained events must have a finite positive median duration.")
     return json_safe(dict(identity, channels=channels, labels=[int(label) for label in labels], bands=list(extraction.bands),
+        summary_band_limits=dict(extraction.bands), summary_speech_duration_seconds=duration,
         pairs=pairs, settings=settings, surface_options=dict(brain_color=options.get("brain_color", "lightgray"),
         brain_opacity=options.get("brain_opacity", .38), point_size=options.get("point_size", 14.)),
         surface_enabled=surface, curves_enabled=curves, warnings=warnings))
+
+
+def cluster_grid_payload(request, metadata):
+    """Read the fixed saved summary only; failures remain local to this view."""
+    columns = {"band", "label", "display_time_seconds", "mean_power_z",
+               "electrode_sem", "n_electrodes", "mean_audio"}
+    try:
+        _, labels = _aligned_result(request["result"], metadata["channels"])
+        if not np.array_equal(labels, np.asarray(metadata["labels"])):
+            raise ValueError("Result labels differ from session metadata.")
+        names = metadata["bands"]
+        if (not names or any(not isinstance(name, str) or not name for name in names)
+                or len(set(names)) != len(names)):
+            raise ValueError("Session bands must be unique names.")
+        populations = {int(label): int(np.sum(labels == label))
+                       for label in np.unique(labels) if label >= 0}
+        if not populations:
+            raise ValueError("No included classes in this session.")
+        limits = metadata.get("summary_band_limits") or {}
+        bands = []
+        for name in names:
+            low, high = limits.get(name, (None, None))
+            if (low, high) != (None, None) and (
+                    not all(isinstance(value, Real) and not isinstance(value, bool)
+                            and math.isfinite(value) for value in (low, high)) or low >= high):
+                raise ValueError("Invalid summary band limits.")
+            bands.append(dict(name=name, low=low, high=high))
+        duration = metadata.get("summary_speech_duration_seconds")
+        if duration is not None and (isinstance(duration, bool) or not isinstance(duration, Real)
+                or not math.isfinite(duration) or duration <= 0 or not math.isfinite(duration * 1000)):
+            raise ValueError("Invalid summary speech duration.")
+        panels = {(band, label): dict(band=band, label=label, times_ms=[], mean=[],
+                                      sem=[], audio=[], counts=[])
+                  for band in names for label in populations}
+        path = Path(request["output_dir"]) / "fourband_curve_summary.csv"
+        with path.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream, strict=True)
+            if (reader.fieldnames is None or len(reader.fieldnames) != len(columns)
+                    or set(reader.fieldnames) != columns):
+                raise ValueError("Summary CSV columns do not match the saved curve schema.")
+            for row in reader:
+                if None in row or any(value is None for value in row.values()):
+                    raise ValueError("Summary CSV row has missing or extra cells.")
+                label = float(row["label"])
+                if not math.isfinite(label) or not label.is_integer():
+                    raise ValueError("Summary class labels must be finite integers.")
+                key = row["band"], int(label)
+                if key not in panels:
+                    raise ValueError("Summary bands/classes differ from the current session.")
+                panel = panels[key]
+                time = float(row["display_time_seconds"]) * 1000
+                if not math.isfinite(time) or (panel["times_ms"] and time <= panel["times_ms"][-1]):
+                    raise ValueError("Summary panel times must be finite, unique and increasing.")
+                count = float(row["n_electrodes"])
+                if (not math.isfinite(count) or not count.is_integer()
+                        or not 0 <= count <= populations[key[1]]):
+                    raise ValueError("Summary electrode counts must be integers within class population.")
+                for source, target in (("mean_power_z", "mean"), ("electrode_sem", "sem"),
+                                       ("mean_audio", "audio")):
+                    value = float(row[source]) if row[source].strip() else math.nan
+                    if math.isinf(value) or (target == "sem" and value < 0):
+                        raise ValueError("Summary curves require finite or NaN values and nonnegative SEM.")
+                    panel[target].append(None if math.isnan(value) else value)
+                panel["times_ms"].append(time)
+                panel["counts"].append(int(count))
+        if any(not panel["times_ms"] for panel in panels.values()):
+            raise ValueError("Summary CSV is missing a current band/class panel.")
+        for band in names:
+            grids = [panels[band, label]["times_ms"] for label in populations]
+            if any(grid != grids[0] for grid in grids[1:]):
+                raise ValueError("Summary class panels must share the saved band time grid.")
+        return json_safe(dict(available=True, bands=bands,
+            classes=[dict(label=label, n_electrodes=count) for label, count in populations.items()],
+            speech_offset_ms=None if duration is None else duration * 1000, panels=list(panels.values())))
+    except FileNotFoundError:
+        return dict(available=False, message="Saved four-band curve summary is unavailable for this result.")
+    except (OSError, UnicodeError, csv.Error, ValueError, KeyError, TypeError, AttributeError, OverflowError):
+        return dict(available=False, message="Saved four-band curve summary is invalid or does not match this result.")
 
 
 def surface_payload(request):
