@@ -83,7 +83,7 @@ def test_metadata_contract_loads_original_events_and_saved_run_identity(snapshot
                                     first_offset=35., second_onset=37., second_offset=38., gap_seconds=2.)
     assert meta["settings"] == dict(trial_ids=[8, 9], sigma_seconds=.15,
                                      pre_seconds=1., post_seconds=1., display_sfreq=100.)
-    assert meta["surface_options"] == dict(brain_color="lightgray", brain_opacity=.25, point_size=14.)
+    assert meta["surface_options"] == dict(brain_color="ivory", brain_opacity=.25, point_size=14.)
     assert meta["surface_enabled"] is True and meta["curves_enabled"] is True
     assert joblib.hash(snapshot) == before
     json.dumps(meta, allow_nan=False)
@@ -94,6 +94,17 @@ def test_metadata_original_adjacency_does_not_bridge_a_dropped_trial(snapshot):
         epoch.events = epoch.events.iloc[[0, 2]].copy()
     with pytest.raises(ValueError, match="adjacent"):
         adapter().session_metadata(snapshot)
+
+
+def test_browser_cortex_defaults_to_opaque_ivory_but_preserves_explicit_options(snapshot):
+    snapshot["surface_options"] = {}
+    options = adapter().session_metadata(snapshot)["surface_options"]
+    assert options["brain_color"] == "ivory"
+    assert options["brain_opacity"] == 1.
+    snapshot["surface_options"] = dict(brain_color="#809a86", brain_opacity=.4)
+    options = adapter().session_metadata(snapshot)["surface_options"]
+    assert options["brain_color"] == "#809a86"
+    assert options["brain_opacity"] == .4
 
 
 def test_metadata_defaults_to_first_pair_and_preserves_explicit_identity(snapshot):

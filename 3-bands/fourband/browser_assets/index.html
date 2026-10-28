@@ -121,6 +121,7 @@
         </fieldset>
       </div>
       <div class="appearance">
+        <div class="class-color-control">
         <label class="swatch-label"
           >Class
           <input
@@ -131,13 +132,21 @@
             aria-label="Selected class color"
             disabled
         /></label>
+        <div id="class-color-presets" role="group" aria-label="类别预设颜色">
+          <button type="button" class="class-color-preset" data-color="#bf7b7b" title="柔红" aria-label="类别颜色：柔红" aria-pressed="false" disabled></button>
+          <button type="button" class="class-color-preset" data-color="#7e9e85" title="灰绿" aria-label="类别颜色：灰绿" aria-pressed="false" disabled></button>
+          <button type="button" class="class-color-preset" data-color="#7f9db8" title="雾蓝" aria-label="类别颜色：雾蓝" aria-pressed="false" disabled></button>
+          <button type="button" class="class-color-preset" data-color="#bfb184" title="浅黄" aria-label="类别颜色：浅黄" aria-pressed="false" disabled></button>
+          <button type="button" class="class-color-preset" data-color="#e8e8e3" title="柔白" aria-label="类别颜色：柔白" aria-pressed="false" disabled></button>
+        </div>
+        </div>
         <span class="separator brain-control"></span>
         <label class="swatch-label brain-control"
           >Cortex
           <input
             id="brain-color"
             type="color"
-            value="#c8ccd0"
+            value="#fffff0"
             aria-label="Cortex color"
             disabled
         /></label>
@@ -149,9 +158,9 @@
             min="0"
             max="1"
             step="0.05"
-            value="0.65"
+            value="1"
             disabled
-          /><output id="opacity-value">0.65</output></label
+          /><output id="opacity-value">1.00</output></label
         >
         <label class="range-label brain-control"
           >Size

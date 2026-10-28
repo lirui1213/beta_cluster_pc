@@ -161,8 +161,8 @@ def session_metadata(request):
         raise ValueError("Retained events must have a finite positive median duration.")
     return json_safe(dict(identity, channels=channels, labels=[int(label) for label in labels], bands=list(extraction.bands),
         summary_band_limits=dict(extraction.bands), summary_speech_duration_seconds=duration,
-        pairs=pairs, settings=settings, surface_options=dict(brain_color=options.get("brain_color", "lightgray"),
-        brain_opacity=options.get("brain_opacity", .38), point_size=options.get("point_size", 14.)),
+        pairs=pairs, settings=settings, surface_options=dict(brain_color=options.get("brain_color", "ivory"),
+        brain_opacity=options.get("brain_opacity", 1.), point_size=options.get("point_size", 14.)),
         surface_enabled=surface, curves_enabled=curves, warnings=warnings))
 
 

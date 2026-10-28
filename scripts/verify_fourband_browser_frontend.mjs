@@ -214,8 +214,6 @@ const metadata = {
     display_sfreq: 100,
   },
   surface_options: {
-    brain_color: "ivory",
-    brain_opacity: 0.65,
     point_size: 14,
   },
   surface_enabled: true,
@@ -481,6 +479,29 @@ try {
   assert.equal(await page.locator("#pair").inputValue(), "0");
   assert.equal(await page.locator("#point-size").inputValue(), "14");
   assert.equal(await page.locator("#brain-color").inputValue(), "#fffff0");
+  assert.equal(await page.locator("#brain-opacity").inputValue(), "1");
+  assert.equal(await page.locator("#opacity-value").textContent(), "1.00");
+  const presets = [
+    ["柔红", "#bf7b7b"], ["灰绿", "#7e9e85"], ["雾蓝", "#7f9db8"],
+    ["浅黄", "#bfb184"], ["柔白", "#e8e8e3"],
+  ];
+  assert.equal(await page.locator(".class-color-preset").count(), 5);
+  const beforePresets = requests.filter(req => req.url.endsWith("api/compute")).length;
+  for (const [name, color] of presets) {
+    const swatch = page.getByRole("button", {name:`类别颜色：${name}`,exact:true});
+    await swatch.click();
+    assert.equal(await page.locator("#class-color").inputValue(), color);
+    assert.equal(await swatch.getAttribute("aria-pressed"), "true");
+    await page.waitForFunction(color => [...document.querySelectorAll('#cluster-grid [data-label="0"] .js-plotly-plot')]
+      .every(el => el.data[2].line.color === color), color);
+    await page.waitForFunction(color => document.querySelector("#plot-0").data[0].line.color === color, color);
+    assert.equal(await page.locator(".class-color-preset[aria-pressed=true]").count(), 1);
+  }
+  assert.equal(requests.filter(req => req.url.endsWith("api/compute")).length, beforePresets);
+  await page.screenshot({path:path.join(out,"desktop-muted-presets.png"),fullPage:true});
+  await page.locator("#class-color").fill("#167d91");
+  await page.waitForFunction(() => document.querySelector("#plot-0").data[0].line.color === "#167d91");
+  assert.equal(await page.locator(".class-color-preset[aria-pressed=true]").count(), 0);
   const pendingPage = await browser.newPage();
   await pendingPage.goto(base);
   await pendingPage.waitForFunction(
@@ -631,6 +652,10 @@ try {
   const computeCount = requests.filter((req) =>
     req.url.endsWith("api/compute"),
   ).length;
+  await page.getByRole("button", {name:"类别颜色：灰绿",exact:true}).click();
+  await page.waitForFunction(() => [...document.querySelectorAll('#cluster-grid [data-label="1"] .js-plotly-plot')]
+    .every(el => el.data[2].line.color === "#7e9e85" && el.data[1].fillcolor === "rgba(126,158,133,0.18)"));
+  assert.equal(await page.locator('#cluster-grid [data-label="0"] .js-plotly-plot').first().evaluate(el => el.data[2].line.color), "#167d91");
   await page.locator("#class-color").fill("#d42f66");
   await page.waitForFunction(() => [...document.querySelectorAll('#cluster-grid [data-label="1"] .js-plotly-plot')]
     .every(el => el.data[2].line.color === "#d42f66" && el.data[1].fillcolor === "rgba(212,47,102,0.18)"));
@@ -706,6 +731,7 @@ try {
   await page.waitForFunction(
     () => document.querySelector("#status-text").textContent === "Ready",
   );
+  assert.equal(await page.locator("#brain-opacity").inputValue(), "0.3", "Refresh preserves explicit appearance adjustments");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(300);
   const mobile = await page.evaluate(() => ({
@@ -746,6 +772,10 @@ try {
       );
     }
   await page.screenshot({ path: path.join(out, "mobile.png"), fullPage: true });
+  for (const swatch of await page.locator(".class-color-preset").all()) {
+    const bounds = await swatch.boundingBox();
+    assert.ok(bounds.x >= 0 && bounds.x+bounds.width <= 390, "Preset swatches fit mobile viewport");
+  }
   await page.waitForFunction(() => [...document.querySelectorAll("#cluster-grid .js-plotly-plot")].every(el => Math.abs(el._fullLayout.width-el.clientWidth) < 2));
   const mobileGrid = await page.locator("#cluster-grid .js-plotly-plot").evaluateAll(nodes => nodes.map(el => el.getBoundingClientRect().toJSON()));
   assert.ok(mobileGrid[1].top >= mobileGrid[0].bottom, "Band panels stack on mobile");

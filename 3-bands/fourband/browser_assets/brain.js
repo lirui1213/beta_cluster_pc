@@ -41,8 +41,8 @@ export class BrainView {
     this.pointer = new THREE.Vector2();
     this.sphere = new THREE.SphereGeometry(1, 16, 12);
     this.style = {
-      brain_color: "#c8ccd0",
-      brain_opacity: 0.65,
+      brain_color: "#fffff0",
+      brain_opacity: 1,
       point_size: 14,
       electrodes: true,
       labels: false,

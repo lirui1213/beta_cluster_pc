@@ -191,6 +191,8 @@ function updateSelection() {
     classOf() === undefined ? "" : `Class ${classOf()}`;
   $("selection-dot").style.background = selectedColor();
   $("class-color").value = selectedColor();
+  document.querySelectorAll(".class-color-preset").forEach(button =>
+    button.setAttribute("aria-pressed", String(button.dataset.color === selectedColor().toLowerCase())));
   document.documentElement.style.setProperty("--accent", selectedColor());
   $("previous-pair").disabled = state.closed || state.pair <= 0;
   $("next-pair").disabled =
@@ -514,11 +516,11 @@ function configure(meta) {
   const surface = meta.surface_options || {};
   $("brain-color").value = colorHex(
     saved.brain_color || surface.brain_color,
-    "#c8ccd0",
+    "#fffff0",
   );
   $("brain-opacity").value = Number.isFinite(saved.brain_opacity)
     ? saved.brain_opacity
-    : (surface.brain_opacity ?? 0.65);
+    : (surface.brain_opacity ?? 1);
   const pointSize = Number.isFinite(saved.point_size)
     ? saved.point_size
     : (surface.point_size ?? 14);
@@ -534,7 +536,7 @@ function configure(meta) {
     $(id).checked = typeof saved[key] === "boolean" ? saved[key] : fallback;
   document
     .querySelectorAll(
-      "#controls button, #controls select, #controls input, .appearance input, #clear-cache",
+      "#controls button, #controls select, #controls input, .appearance input, .class-color-preset, #clear-cache",
     )
     .forEach((element) => {
       element.disabled = false;
@@ -851,10 +853,18 @@ $("class-filter").addEventListener("change", () => {
     requestDisplay();
   } else updateSelection();
 });
-$("class-color").addEventListener("input", () => {
+function applyClassColor() {
   state.colors[classOf()] = $("class-color").value;
   refreshPlotStyle();
   clusterGrid.recolor().catch(error => notice(`Class summary color update failed: ${error.message}`));
+}
+$("class-color").addEventListener("input", applyClassColor);
+document.querySelectorAll(".class-color-preset").forEach(button => {
+  button.style.backgroundColor = button.dataset.color;
+  button.addEventListener("click", () => {
+    $("class-color").value = button.dataset.color;
+    applyClassColor();
+  });
 });
 for (const id of [
   "brain-color",
